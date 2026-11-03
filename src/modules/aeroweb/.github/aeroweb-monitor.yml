@@ -1,0 +1,28 @@
+name: Aeroweb Monitor 24/7
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # Se ejecuta automáticamente cada 30 minutos
+  workflow_dispatch: # Permite ejecutarlo manualmente desde GitHub cuando quieras
+
+jobs:
+  check-roster:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Instalar dependencias del script
+        run: npm install node-fetch
+
+      - name: Ejecutar monitor de Aeroweb
+        env:
+          AEROWEB_USER: ${{ secrets.AEROWEB_USER }}
+          AEROWEB_PASS: ${{ secrets.AEROWEB_PASS }}
+          EXPO_PUSH_TOKEN: ${{ secrets.EXPO_PUSH_TOKEN }}
+        run: node scripts/monitor.js
