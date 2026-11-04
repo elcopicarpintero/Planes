@@ -16,20 +16,18 @@ import { COLORS } from '../../theme/colors';
 import { saveEncryptedData, getEncryptedData } from '../../services/storage';
 
 export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout }) {
-  // Modos: 'login' | 'register' | 'edit'
-  const [mode, setMode] = useState('login');
+  const [mode, setMode] = useState('login'); // 'login' | 'register' | 'edit'
   const [isLoggedIn, setIsLoggedIn] = useState(false);
 
-  // Campos de cuenta de la App
   const [email, setEmail] = useState('');
   const [appPassword, setAppPassword] = useState('');
 
-  // Campos operativos del piloto (100% vacíos por defecto)
+  // Campos operativos 100% en blanco para usuarios nuevos
   const [nombre, setNombre] = useState('');
   const [aerowebUser, setAerowebUser] = useState('');
   const [aerowebPass, setAerowebPass] = useState('');
   const [dni, setDni] = useState('');
-  const [rank, setRank] = useState(''); // '' sin seleccionar al inicio
+  const [rank, setRank] = useState('');
 
   useEffect(() => {
     checkActiveSession();
@@ -37,12 +35,19 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
 
   const checkActiveSession = async () => {
     try {
-      const activeProfile = await getEncryptedData('user_profile');
-      if (activeProfile && activeProfile.email) {
+      let activeProfile = await getEncryptedData('user_profile');
+      if (!activeProfile) {
+        const raw = await AsyncStorage.getItem('user_profile');
+        if (raw) activeProfile = JSON.parse(raw);
+      }
+
+      // Detecta sesión activa (incluso si venía de una versión anterior sin email)
+      if (activeProfile && (activeProfile.aerowebUser || activeProfile.email)) {
         setIsLoggedIn(true);
         setMode('edit');
         setEmail(activeProfile.email || '');
-        setNombre(activeProfile.nombre || '');
+        setAppPassword(activeProfile.appPassword || '');
+        setNombre(activeProfile.nombre || activeProfile.fullName || '');
         setAerowebUser(activeProfile.aerowebUser || '');
         setAerowebPass(activeProfile.aerowebPass || '');
         setDni(activeProfile.dni || '');
@@ -57,7 +62,6 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
     }
   };
 
-  // Base de datos de cuentas registradas
   const getAccountsDB = async () => {
     try {
       const dbRaw = await getEncryptedData('accounts_db');
@@ -68,48 +72,60 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
   };
 
   const handleLogin = async () => {
-    const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail || !appPassword) {
-      Alert.alert('Datos incompletos', 'Ingresá tu correo electrónico y contraseña.');
+    const cleanKey = email.trim().toLowerCase();
+    if (!cleanKey || !appPassword) {
+      Alert.alert('Datos incompletos', 'Ingresá tu correo electrónico (o legajo) y tu contraseña.');
       return;
     }
 
     const db = await getAccountsDB();
-    const account = db[cleanEmail];
+    // Permite ingresar por email o por legajo si ya estaba registrado
+    let account = db[cleanKey];
+    if (!account) {
+      account = Object.values(db).find(
+        acc => acc.aerowebUser === cleanKey || (acc.email && acc.email.toLowerCase() === cleanKey)
+      );
+    }
 
     if (!account || account.appPassword !== appPassword) {
-      Alert.alert('Error de acceso', 'Correo o contraseña incorrectos, o el usuario aún no está registrado.');
+      Alert.alert(
+        'Usuario no encontrado o clave incorrecta',
+        'Si es tu primera vez con el nuevo sistema de cuentas, tocá la pestaña "Registrarse" arriba para crear tu acceso.'
+      );
       return;
     }
 
-    // Restaurar sesión activa con todas las credenciales guardadas
     await saveEncryptedData('user_profile', account);
     await AsyncStorage.setItem('user_profile', JSON.stringify(account));
 
     setIsLoggedIn(true);
+    setMode('edit');
     if (onProfileUpdated) onProfileUpdated(account);
-    Alert.alert('¡Bienvenido a bordo!', `Sesión iniciada como ${account.nombre || cleanEmail}`);
     if (onClose) onClose();
   };
 
   const handleRegisterOrSave = async () => {
     const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail || (!isLoggedIn && !appPassword)) {
-      Alert.alert('Faltan datos de cuenta', 'Por favor completá tu email y una contraseña para la app.');
+    if (!cleanEmail) {
+      Alert.alert('Falta tu Email', 'Ingresá un correo electrónico para poder iniciar sesión fácilmente la próxima vez.');
+      return;
+    }
+    if (!appPassword) {
+      Alert.alert('Falta Contraseña', 'Definí una contraseña para ingresar a la app cuando cierres sesión.');
       return;
     }
     if (!aerowebUser.trim() || !aerowebPass.trim() || !rank) {
-      Alert.alert('Faltan datos operativos', 'Completá tu Legajo, Contraseña de Aeroweb y seleccioná tu Función (Comandante o Primer Oficial).');
+      Alert.alert('Faltan datos operativos', 'Completá tu Legajo, Clave de Aeroweb y seleccioná tu Función.');
       return;
     }
 
     const db = await getAccountsDB();
-    const existingAccount = db[cleanEmail] || {};
 
     const profileData = {
       email: cleanEmail,
-      appPassword: appPassword || existingAccount.appPassword,
+      appPassword: appPassword,
       nombre: nombre.trim(),
+      fullName: nombre.trim(),
       aerowebUser: aerowebUser.trim(),
       aerowebPass: aerowebPass.trim(),
       dni: dni.trim() || aerowebPass.trim(),
@@ -117,22 +133,22 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
       updatedAt: new Date().toISOString()
     };
 
-    // Guardar en la base de datos de cuentas por Email y en la sesión activa
     db[cleanEmail] = profileData;
     await saveEncryptedData('accounts_db', db);
     await saveEncryptedData('user_profile', profileData);
     await AsyncStorage.setItem('user_profile', JSON.stringify(profileData));
 
     setIsLoggedIn(true);
+    setMode('edit');
     if (onProfileUpdated) onProfileUpdated(profileData);
-    Alert.alert('Guardado exitoso', 'Tus credenciales y perfil quedaron registrados correctamente.');
+    Alert.alert('Perfil Guardado', 'Tus credenciales quedaron asociadas a tu correo para futuros ingresos.');
     if (onClose) onClose();
   };
 
   const handleLogoutConfirm = () => {
     Alert.alert(
       'Cerrar Sesión',
-      '¿Querés cerrar tu sesión actual? La próxima vez solo tendrás que ingresar tu email y contraseña.',
+      '¿Querés cerrar tu sesión? Tus credenciales quedan guardadas en tu cuenta para que vuelvas a entrar solo con tu Email y Contraseña.',
       [
         { text: 'Cancelar', style: 'cancel' },
         {
@@ -158,13 +174,10 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
 
   return (
     <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={{ flex: 1 }}
-      >
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
         <View style={styles.header}>
           <Text style={styles.headerTitle}>
-            {isLoggedIn ? 'Mi Perfil Operativo' : (mode === 'login' ? 'Iniciar Sesión' : 'Crear Cuenta Nueva')}
+            {isLoggedIn ? 'Configuración de Perfil' : (mode === 'login' ? 'Iniciar Sesión' : 'Registro de Nuevo Usuario')}
           </Text>
           {onClose && isLoggedIn && (
             <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
@@ -188,7 +201,8 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
                 style={[styles.switchTab, mode === 'register' && styles.switchTabActive]}
                 onPress={() => {
                   setMode('register');
-                  // Asegurar campos limpios para nuevo registro
+                  setEmail('');
+                  setAppPassword('');
                   setNombre('');
                   setAerowebUser('');
                   setAerowebPass('');
@@ -197,24 +211,23 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
                 }}
               >
                 <Text style={[styles.switchTabText, mode === 'register' && styles.switchTabTextActive]}>
-                  Registrarse
+                  Registrarse (Nuevo)
                 </Text>
               </TouchableOpacity>
             </View>
           )}
 
-          {/* MODO LOGIN SIMPLE */}
           {!isLoggedIn && mode === 'login' ? (
             <View style={styles.card}>
-              <Text style={styles.sectionTitle}>Ingresá con tu cuenta de PLANES</Text>
+              <Text style={styles.sectionTitle}>Bienvenido a PLANES</Text>
               <Text style={styles.helperText}>
-                Tus credenciales de Aeroweb y configuración se recuperarán automáticamente.
+                Ingresá tu email y contraseña. Si sos un usuario nuevo probando la beta, tocá la pestaña "Registrarse (Nuevo)" arriba.
               </Text>
 
               <Text style={styles.label}>Correo Electrónico</Text>
               <TextInput
                 style={styles.input}
-                placeholder="ejemplo@correo.com"
+                placeholder="tu@correo.com"
                 placeholderTextColor="#94A3B8"
                 autoCapitalize="none"
                 keyboardType="email-address"
@@ -225,7 +238,7 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
               <Text style={styles.label}>Contraseña</Text>
               <TextInput
                 style={styles.input}
-                placeholder="Tu contraseña de la app"
+                placeholder="Contraseña de tu cuenta"
                 placeholderTextColor="#94A3B8"
                 secureTextEntry
                 value={appPassword}
@@ -233,44 +246,42 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
               />
 
               <TouchableOpacity style={styles.primaryBtn} onPress={handleLogin}>
-                <Text style={styles.primaryBtnText}>Ingresar a la App</Text>
+                <Text style={styles.primaryBtnText}>Ingresar</Text>
               </TouchableOpacity>
             </View>
           ) : (
-            /* MODO REGISTRO NUEVO O EDICIÓN DE PERFIL */
             <View>
               <View style={styles.card}>
-                <Text style={styles.sectionTitle}>1. Cuenta de Acceso (App)</Text>
+                <Text style={styles.sectionTitle}>1. Datos de Acceso a la App</Text>
+                <Text style={styles.helperText}>
+                  Con este correo y contraseña vas a volver a entrar si cerrás sesión.
+                </Text>
+
                 <Text style={styles.label}>Correo Electrónico</Text>
                 <TextInput
-                  style={[styles.input, isLoggedIn && { backgroundColor: '#F1F5F9', color: '#64748B' }]}
-                  placeholder="Tu email para iniciar sesión"
+                  style={styles.input}
+                  placeholder="ejemplo@gmail.com"
                   placeholderTextColor="#94A3B8"
                   autoCapitalize="none"
                   keyboardType="email-address"
-                  editable={!isLoggedIn}
                   value={email}
                   onChangeText={setEmail}
                 />
 
-                {!isLoggedIn && (
-                  <>
-                    <Text style={styles.label}>Contraseña para la App</Text>
-                    <TextInput
-                      style={styles.input}
-                      placeholder="Creá una contraseña para entrar a PLANES"
-                      placeholderTextColor="#94A3B8"
-                      secureTextEntry
-                      value={appPassword}
-                      onChangeText={setAppPassword}
-                    />
-                  </>
-                )}
+                <Text style={styles.label}>Contraseña de Acceso a la App</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Definí tu clave para entrar a PLANES"
+                  placeholderTextColor="#94A3B8"
+                  secureTextEntry
+                  value={appPassword}
+                  onChangeText={setAppPassword}
+                />
 
                 <Text style={styles.label}>Nombre y Apellido</Text>
                 <TextInput
                   style={styles.input}
-                  placeholder="Ej: Juan Pérez"
+                  placeholder="Ej: Damián Croci"
                   placeholderTextColor="#94A3B8"
                   value={nombre}
                   onChangeText={setNombre}
@@ -278,15 +289,15 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
               </View>
 
               <View style={styles.card}>
-                <Text style={styles.sectionTitle}>2. Función y Credenciales Aeroweb</Text>
-                <Text style={styles.label}>Seleccioná tu Función (Sin preselección)</Text>
+                <Text style={styles.sectionTitle}>2. Credenciales Aeroweb y Función</Text>
+                <Text style={styles.label}>Función Operativa</Text>
                 <View style={styles.rankContainer}>
                   <TouchableOpacity
                     style={[styles.rankBtn, rank === 'Comandante' && styles.rankBtnActive]}
                     onPress={() => setRank('Comandante')}
                   >
                     <Text style={[styles.rankText, rank === 'Comandante' && styles.rankTextActive]}>
-                      👨‍✈️ Comandante (CP)
+                      👨‍✈️ Comandante
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -294,15 +305,15 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
                     onPress={() => setRank('Primer Oficial')}
                   >
                     <Text style={[styles.rankText, rank === 'Primer Oficial' && styles.rankTextActive]}>
-                      ✈️ Primer Oficial (FO)
+                      ✈️ Primer Oficial
                     </Text>
                   </TouchableOpacity>
                 </View>
 
-                <Text style={styles.label}>Legajo Aerolíneas (Usuario Aeroweb)</Text>
+                <Text style={styles.label}>Legajo Aerolíneas</Text>
                 <TextInput
                   style={styles.input}
-                  placeholder="Ingresá tu número de legajo"
+                  placeholder="Sin selección previa (Ej: 31451)"
                   placeholderTextColor="#94A3B8"
                   keyboardType="numeric"
                   value={aerowebUser}
@@ -319,10 +330,10 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
                   onChangeText={setAerowebPass}
                 />
 
-                <Text style={styles.label}>DNI (Para Autogestión de Remis / Pick Up)</Text>
+                <Text style={styles.label}>DNI (Para Autogestión / Pick Up)</Text>
                 <TextInput
                   style={styles.input}
-                  placeholder="Tu número de DNI sin puntos"
+                  placeholder="Tu DNI sin puntos"
                   placeholderTextColor="#94A3B8"
                   keyboardType="numeric"
                   value={dni}
@@ -331,13 +342,13 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
 
                 <TouchableOpacity style={styles.primaryBtn} onPress={handleRegisterOrSave}>
                   <Text style={styles.primaryBtnText}>
-                    {isLoggedIn ? 'Guardar Cambios' : 'Registrarme e Ingresar'}
+                    {isLoggedIn ? 'Guardar Perfil y Credenciales' : 'Crear Cuenta e Ingresar'}
                   </Text>
                 </TouchableOpacity>
 
                 {isLoggedIn && (
                   <TouchableOpacity style={styles.logoutBtn} onPress={handleLogoutConfirm}>
-                    <Text style={styles.logoutBtnText}>Cerrar Sesión</Text>
+                    <Text style={styles.logoutBtnText}>🚪 Cerrar Sesión</Text>
                   </TouchableOpacity>
                 )}
               </View>
@@ -380,7 +391,7 @@ const styles = StyleSheet.create({
   },
   switchTab: { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: 8 },
   switchTabActive: { backgroundColor: COLORS.primary },
-  switchTabText: { fontSize: 14, fontWeight: 'bold', color: '#475569' },
+  switchTabText: { fontSize: 13, fontWeight: 'bold', color: '#475569' },
   switchTabTextActive: { color: '#FFFFFF' },
   card: {
     backgroundColor: COLORS.cardBg,
@@ -391,7 +402,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.borderLight
   },
   sectionTitle: { fontSize: 16, fontWeight: 'bold', color: COLORS.primary, marginBottom: 6 },
-  helperText: { fontSize: 12, color: '#64748B', marginBottom: 14 },
+  helperText: { fontSize: 12, color: '#64748B', marginBottom: 12 },
   label: { fontSize: 12, fontWeight: '700', color: '#334155', marginTop: 12, marginBottom: 6 },
   input: {
     backgroundColor: '#F8FAFC',
@@ -429,7 +440,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#FEE2E2',
     borderWidth: 1,
     borderColor: '#FCA5A5',
-    paddingVertical: 13,
+    paddingVertical: 14,
     borderRadius: 12,
     alignItems: 'center',
     marginTop: 14

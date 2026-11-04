@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { WebView } from 'react-native-webview';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { COLORS } from '../../theme/colors';
 import { getEncryptedData } from '../../services/storage';
 
@@ -19,77 +20,87 @@ function extractDateCode(str) {
   return `${m[1].padStart(2, '0')}${m[2].toUpperCase()}`;
 }
 
+function formatCrewMember(rolRaw, nombreRaw, dutyRaw = 'OP') {
+  let rol = (rolRaw || '').toUpperCase().trim();
+  if (rol === 'JP') rol = 'CM';
+  let nombre = (nombreRaw || '')
+    .trim()
+    .replace(/^[,.\s-]+|[,.\s-]+$/g, '')
+    .replace(/\s+/g, ' ');
+
+  return {
+    rol,
+    duty: (dutyRaw || 'OP').toUpperCase().trim(),
+    nombre,
+    label: rol === 'CP' ? 'Comandante' : (rol === 'FO' ? 'Primer Oficial' : (rol === 'CM' ? 'Comisario' : 'Tripulante')),
+    rangType: rol === 'CP' ? '4_gold' : (rol === 'FO' ? '3_gold' : (rol === 'CM' ? '2_silver' : 'dots'))
+  };
+}
+
 function parseCrewFromRawText(rawText, userProfile) {
   const crew = [];
 
   if (rawText) {
     const clean = rawText
-      .replace(/Tripulaci[oó]n del vuelo\s*-\s*AR\d+[A-Z]?/gi, ' ')
+      .replace(/Tripulaci[oó]n del vuelo\s*[-:]?\s*(?:AR\s*)?\d+[A-Z]?/gi, ' | ')
+      .replace(/\bCAT\s+DUTY\s+TRIPULANTE\b/gi, ' | ')
       .replace(/\s+/g, ' ')
       .trim();
 
-    // Captura el formato exacto sin espacios de Aeroweb: (CP|FO|CM|TC|AX|JP) + (OP|DH) + APELLIDO, NOMBRE
-    const tokenRegex = /(CP|FO|CM|TC|AX|JP)(?:OP|DH)\s*([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s,.'-]+?)(?=(?:CP|FO|CM|TC|AX|JP)(?:OP|DH)|\[|\bAR\d|\bTripulaci|$)/gi;
-
+    const markerRegex = /\b(CP|FO|CM|TC|AX|JP)\s*(OP|DH)\b/gi;
+    const markers = [];
     let m;
-    while ((m = tokenRegex.exec(clean)) !== null) {
-      let rol = m[1].toUpperCase();
-      if (rol === 'JP') rol = 'CM';
-      let nombre = m[2].trim().replace(/^[,.\s-]+|[,.\s-]+$/g, '').replace(/\s+/g, ' ');
+    while ((m = markerRegex.exec(clean)) !== null) {
+      markers.push({
+        rol: m[1].toUpperCase(),
+        duty: m[2].toUpperCase(),
+        startIndex: m.index,
+        nameStartIndex: markerRegex.lastIndex
+      });
+    }
 
+    for (let i = 0; i < markers.length; i++) {
+      const current = markers[i];
+      const nextStart = i + 1 < markers.length ? markers[i + 1].startIndex : clean.length;
+      let rawName = clean.slice(current.nameStartIndex, nextStart);
+
+      rawName = rawName
+        .split(/\||\[|\bAR\s*\d{3,4}|\bTripulaci|\bMensajes|\bEstado|\bCheckin|\bActividad|\bLun\b|\bMar\b|\bMi[eé]\b|\bJue\b|\bVie\b|\bS[aá]b\b|\bDom\b/i)[0]
+        .trim();
+
+      const member = formatCrewMember(current.rol, rawName, current.duty);
       if (
-        nombre.length > 3 &&
-        !nombre.includes('CHECKIN') &&
-        !nombre.includes('ACTIVIDAD') &&
-        !crew.some(c => c.nombre === nombre && c.rol === rol)
+        member.nombre.length > 2 &&
+        !crew.some(c => c.nombre === member.nombre && c.rol === member.rol)
       ) {
-        crew.push({
-          rol,
-          nombre,
-          label: rol === 'CP' ? 'Comandante' : (rol === 'FO' ? 'Primer Oficial' : (rol === 'CM' ? 'Comisario' : 'Tripulante')),
-          rangType: rol === 'CP' ? '4_gold' : (rol === 'FO' ? '3_gold' : (rol === 'CM' ? '2_silver' : 'dots'))
-        });
+        crew.push(member);
       }
     }
   }
 
-  if (crew.length === 0 && userProfile && userProfile.fullName) {
+  const profileName = userProfile?.nombre || userProfile?.fullName;
+  if (crew.length === 0 && profileName) {
     const isCmd = userProfile.rank === 'Comandante';
     crew.push({
       rol: isCmd ? 'CP' : 'FO',
-      nombre: userProfile.fullName.toUpperCase(),
+      duty: 'OP',
+      nombre: profileName.toUpperCase(),
       label: isCmd ? 'Comandante' : 'Primer Oficial',
       rangType: isCmd ? '4_gold' : '3_gold'
     });
   }
 
-  // Orden jerárquico estricto: CP -> FO -> CM -> TC -> AX
   const ordenJerarquia = { CP: 1, FO: 2, CM: 3, TC: 4, AX: 5 };
   crew.sort((a, b) => (ordenJerarquia[a.rol] || 99) - (ordenJerarquia[b.rol] || 99));
 
   return crew;
 }
 
-function extractPickupInfo(fullText) {
-  if (!fullText) return {};
-  const pickupMap = {};
-  const regex = /(\d{2}[A-Z]{3})[^]*?(?:Pick\s*Up|Remis|B[uú]squeda)[:\s]*(\d{2}:\d{2})(?:[^]*?(?:Direcci[oó]n|Domicilio)[:\s]*([^\n\r]+))?/gi;
-  let m;
-  while ((m = regex.exec(fullText)) !== null) {
-    pickupMap[m[1].toUpperCase()] = {
-      pickupTime: m[2],
-      pickupAddress: m[3] ? m[3].trim() : null
-    };
-  }
-  return pickupMap;
-}
-
 function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
   if (!fullText) return [];
   const cleanText = fullText.replace(/\s+/g, ' ');
-  const pickupMap = extractPickupInfo(fullText);
 
-  const pattern = /(?:([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})\s+)?(AR\s*\d+[A-Z]?|RPT|D\/L|VAC|SBF|SB[A-Z]*|\*|OF|MED|LIC|S\/G|SIM)\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})\s+([A-Z]{3})\s+([A-Z]{3})\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})(?:\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2}))?(?:\s+(73[A-Z0-9]+|33[A-Z0-9]+|E190))?/gi;
+  const pattern = /(?:([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})\s+)?(AR\s*\d+[A-Z]?|RPT|D\/L|VAC|SBF|SB[A-Z]*|\*|OF|MED|LIC|S\/G|SIM)\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})\s+([A-Z]{3})\s+([A-Z]{3})\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})(?:\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2}))?(?:\s+(73[A-Z0-9]+|33[A-Z0-9]+|E190|B73[A-Z0-9]+|B38M))?/gi;
 
   const matches = [];
   let match;
@@ -127,6 +138,8 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
     }
 
     const isFlight = act.startsWith('AR');
+    const flightNumOnly = act.replace(/^AR/i, '');
+
     const chkTime = extractTimeOnly(rawChk);
     if (chkTime !== '-' && isFlight) {
       lastCheckinTime = chkTime;
@@ -138,19 +151,20 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
 
     let cobTextForFlight = '';
     if (isFlight) {
-      const matchingCob = (cobList || []).find(c => c.text && c.text.toUpperCase().includes(act));
+      const flightRegex = new RegExp(`\\b(?:AR\\s*)?${flightNumOnly}\\b`, 'i');
+      const matchingCob = (cobList || []).find(c => c.text && flightRegex.test(c.text));
+
       if (matchingCob) {
         cobTextForFlight = matchingCob.text;
-      } else if (cobList && cobList[flightCounter]) {
-        cobTextForFlight = cobList[flightCounter].text;
       } else if (crewMapByDate && crewMapByDate[dateCode]) {
         cobTextForFlight = crewMapByDate[dateCode];
+      } else if (cobList && cobList[flightCounter]) {
+        cobTextForFlight = cobList[flightCounter].text;
       }
       flightCounter++;
     }
 
-    const crewSource = cobTextForFlight ? (cobTextForFlight + ' ' + betweenText) : betweenText;
-    const pk = pickupMap[dateCode] || {};
+    const crewSource = [cobTextForFlight, betweenText].filter(Boolean).join(' | ');
 
     parsed.push({
       fechaAsignada: dateCode,
@@ -162,8 +176,6 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
       fin: finTime,
       checkout: outTime,
       tipoAvion: eqStr,
-      pickupTime: pk.pickupTime || null,
-      pickupAddress: pk.pickupAddress || null,
       tripulacion: isFlight ? parseCrewFromRawText(crewSource, userProfile) : []
     });
   }
@@ -171,18 +183,21 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
   return parsed;
 }
 
-export default function AerowebSyncScreen({ onClose, onDataParsed }) {
+export default function AerowebSyncScreen({ onClose, onDataParsed, silentMode = false }) {
   const [credentials, setCredentials] = useState(null);
   const webViewRef = useRef(null);
 
   useEffect(() => {
     async function fetchCredentials() {
       try {
-        const profile = await getEncryptedData('user_profile');
-        if (profile && profile.aerowebUser && (profile.aerowebPass || profile.dni)) {
+        let profile = await getEncryptedData('user_profile');
+        if (!profile) {
+          const raw = await AsyncStorage.getItem('user_profile');
+          if (raw) profile = JSON.parse(raw);
+        }
+        if (profile && profile.aerowebUser) {
           setCredentials(profile);
         } else {
-          Alert.alert('Faltan Credenciales', 'Guardá tu legajo y clave en el Perfil.');
           if (onClose) onClose();
         }
       } catch (err) {
@@ -241,14 +256,16 @@ export default function AerowebSyncScreen({ onClose, onDataParsed }) {
               }
 
               var radios = Array.from(document.querySelectorAll('input[type="radio"]'));
-              var conDetalles = radios.find(r => r.parentElement && r.parentElement.innerText.toLowerCase().includes('con detalle'));
+              var conDetalles = radios.find(function(r) {
+                return r.parentElement && r.parentElement.innerText.toLowerCase().includes('con detalle');
+              });
               if (conDetalles && !conDetalles.checked) {
                 conDetalles.checked = true;
                 conDetalles.click();
               }
 
               var checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
-              checkboxes.forEach(cb => {
+              checkboxes.forEach(function(cb) {
                 if (!cb.checked) {
                   cb.checked = true;
                   cb.click();
@@ -301,7 +318,7 @@ export default function AerowebSyncScreen({ onClose, onDataParsed }) {
                 }
 
                 if (foundDate && rawCobText) {
-                  crewMapByDate[foundDate] = (crewMapByDate[foundDate] || '') + ' ' + rawCobText;
+                  crewMapByDate[foundDate] = (crewMapByDate[foundDate] || '') + ' | ' + rawCobText;
                 }
 
                 if (rawCobText) {
@@ -323,7 +340,7 @@ export default function AerowebSyncScreen({ onClose, onDataParsed }) {
       }
       
       if (window._syncInterval) clearInterval(window._syncInterval);
-      window._syncInterval = setInterval(runAutomation, 900);
+      window._syncInterval = setInterval(runAutomation, 850);
     })();
     true;
   `;
@@ -331,11 +348,15 @@ export default function AerowebSyncScreen({ onClose, onDataParsed }) {
   const handleMessage = async (event) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
-      
+
       if (data.status === 'full_text') {
-        const userProfile = await getEncryptedData('user_profile');
+        let userProfile = await getEncryptedData('user_profile');
+        if (!userProfile) {
+          const raw = await AsyncStorage.getItem('user_profile');
+          if (raw) userProfile = JSON.parse(raw);
+        }
         const rawList = extractRosterForApp(data.text, data.crewMap, data.cobList, userProfile);
-        
+
         if (rawList.length > 0 && onDataParsed) {
           onDataParsed({ type: 'realizada', raw: rawList });
         }
@@ -346,16 +367,40 @@ export default function AerowebSyncScreen({ onClose, onDataParsed }) {
     }
   };
 
+  if (silentMode) {
+    return credentials ? (
+      <View style={styles.hiddenWebView}>
+        <WebView
+          ref={webViewRef}
+          source={{ uri: DIRECT_LOGIN_URL }}
+          injectedJavaScript={injectedCode}
+          injectedJavaScriptBeforeContentLoaded={injectedCode}
+          injectedJavaScriptForMainFrameOnly={false}
+          onMessage={handleMessage}
+          cacheEnabled={false}
+          incognito={true}
+        />
+      </View>
+    ) : null;
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>ACTUALIZANDO</Text>
-        <TouchableOpacity onPress={onClose} style={styles.closeBtn}><Text style={styles.closeBtnText}>✕</Text></TouchableOpacity>
+        <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
+          <Text style={styles.closeBtnText}>✕</Text>
+        </TouchableOpacity>
       </View>
+
       <View style={styles.cardContainer}>
-        <View style={styles.iconCircle}><ActivityIndicator size="large" color={COLORS.primary} /></View>
+        <View style={styles.iconCircle}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+        </View>
         <Text style={styles.syncTitle}>ACTUALIZANDO</Text>
+        <Text style={styles.syncSubTitle}>Sincronizando Plan de Vuelo y Tripulaciones...</Text>
       </View>
+
       {credentials && (
         <View style={styles.hiddenWebView}>
           <WebView
@@ -366,6 +411,7 @@ export default function AerowebSyncScreen({ onClose, onDataParsed }) {
             injectedJavaScriptForMainFrameOnly={false}
             onMessage={handleMessage}
             cacheEnabled={false}
+            incognito={true}
           />
         </View>
       )}
@@ -382,5 +428,6 @@ const styles = StyleSheet.create({
   cardContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30 },
   iconCircle: { width: 80, height: 80, borderRadius: 40, backgroundColor: COLORS.cardBg, justifyContent: 'center', alignItems: 'center', marginBottom: 20, borderWidth: 1, borderColor: COLORS.borderLight },
   syncTitle: { fontSize: 18, fontWeight: 'bold', color: COLORS.textDark, textAlign: 'center', marginTop: 10 },
+  syncSubTitle: { fontSize: 13, color: COLORS.textMuted, textAlign: 'center', marginTop: 8 },
   hiddenWebView: { width: 0, height: 0, opacity: 0, overflow: 'hidden' }
 });

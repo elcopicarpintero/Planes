@@ -1,5 +1,17 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity, Modal, SafeAreaView, StatusBar, ActivityIndicator, Alert } from 'react-native';
+import {
+  StyleSheet,
+  Text,
+  View,
+  ScrollView,
+  TouchableOpacity,
+  Modal,
+  SafeAreaView,
+  StatusBar,
+  ActivityIndicator,
+  Alert,
+  AppState
+} from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage'; 
 import { WebView } from 'react-native-webview';
 import * as Notifications from 'expo-notifications';
@@ -9,18 +21,37 @@ import ProfileSetupScreen from './src/modules/auth/ProfileSetupScreen';
 import AerowebSyncScreen from './src/modules/aeroweb/AerowebSyncScreen';
 import { getEncryptedData } from './src/services/storage';
 
+// Configurar para que las notificaciones suenen y aparezcan como banner incluso con la app abierta
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true
+  })
+});
+
 const URL_PICKUP_HOY = 'https://ssl.aerolineas.com.ar/FORMS/ActividadesProgramadas/Autogestion/IndexPost';
 const URL_PICKUP_MANANA = 'https://ssl.aerolineas.com.ar/FORMS/ActividadesProgramadas/Autogestion/MananaPost';
 
-// Destinos que por distancia/convenio operan con 3 pilotos (Tripulación Reforzada)
 const DESTINOS_TRES_PILOTOS = ['LIM', 'SSA', 'BOG', 'CUN', 'PUJ', 'MIA', 'MAD', 'FCO', 'JFK'];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('hoy');
   const [modalVisible, setModalVisible] = useState(false);
+  const [modalViewMode, setModalViewMode] = useState('detail'); // 'detail' | 'aeroweb'
   const [profileModalVisible, setProfileModalVisible] = useState(false);
   const [syncModalVisible, setSyncModalVisible] = useState(false);
-  const [remisModalVisible, setRemisModalVisible] = useState(false);
+  const [silentSyncRunning, setSilentSyncRunning] = useState(false);
+  const [lastSyncTimeStr, setLastSyncTimeStr] = useState('');
+
+  // Acordeones del detalle Aeroweb
+  const [openAccordion, setOpenAccordion] = useState({
+    pickup: true,
+    flightStatus: true,
+    crew: true,
+    liveWeb: false
+  });
+
   const [activityView, setActivityView] = useState('roster');
   const [viaticosView, setViaticosView] = useState('cantidades');
 
@@ -32,6 +63,7 @@ export default function App() {
   const [remisLoading, setRemisLoading] = useState(true);
 
   const remisWebViewRef = useRef(null);
+  const appStateRef = useRef(AppState.currentState);
 
   const today = new Date();
   const todayStr = String(today.getDate()).padStart(2, '0');
@@ -49,21 +81,21 @@ export default function App() {
           const parsedCurrent = JSON.parse(savedCurrent);
           setRosterData(recalculateExistingCards(parsedCurrent));
         }
+
+        const savedLastSync = await AsyncStorage.getItem('lastSyncTimeStr');
+        if (savedLastSync) setLastSyncTimeStr(savedLastSync);
         
-        const encryptedProfile = await getEncryptedData('user_profile');
+        let encryptedProfile = await getEncryptedData('user_profile');
+        if (!encryptedProfile) {
+          const rawProfile = await AsyncStorage.getItem('user_profile');
+          if (rawProfile) encryptedProfile = JSON.parse(rawProfile);
+        }
+
         if (encryptedProfile && encryptedProfile.aerowebUser) {
           setUserProfileState(encryptedProfile);
           setEsComandante(encryptedProfile.rank === 'Comandante');
         } else {
-          const profile = await AsyncStorage.getItem('user_profile');
-          if (profile) {
-            const pData = JSON.parse(profile);
-            setUserProfileState(pData);
-            setEsComandante(pData.rank === 'Comandante');
-          } else {
-            // Si no hay sesión iniciada, abrir pantalla de Login/Registro
-            setProfileModalVisible(true);
-          }
+          setProfileModalVisible(true);
         }
       } catch(e) {}
     };
@@ -86,6 +118,31 @@ export default function App() {
     loadSavedData();
     registerForPushNotificationsAsync();
   }, []);
+
+  // Motor de actualización automática cada 15 minutos y cuando la app vuelve del fondo
+  useEffect(() => {
+    if (!userProfileState?.aerowebUser) return;
+
+    const autoSyncInterval = setInterval(() => {
+      if (!syncModalVisible && !silentSyncRunning && !modalVisible) {
+        setSilentSyncRunning(true);
+      }
+    }, 15 * 60 * 1000); // Cada 15 minutos
+
+    const subscription = AppState.addEventListener('change', nextAppState => {
+      if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
+        if (!syncModalVisible && !silentSyncRunning && !modalVisible) {
+          setSilentSyncRunning(true);
+        }
+      }
+      appStateRef.current = nextAppState;
+    });
+
+    return () => {
+      clearInterval(autoSyncInterval);
+      subscription.remove();
+    };
+  }, [userProfileState, syncModalVisible, silentSyncRunning, modalVisible]);
 
   const getMsFromDateStr = (fechaDia) => {
     if (!fechaDia) return 0;
@@ -117,10 +174,8 @@ export default function App() {
     return t2 - t1;
   };
 
-  // Detecta automáticamente si la rotación lleva 3 pilotos por convenio (ej: USH+FTE, LIM, SSA o 3 pilotos en lista)
+  // Detecta silenciosamente si el vuelo es de 3 pilotos según las rutas indicadas (USH+FTE, LIM, SSA, etc.)
   const detectarCantidadPilotos = (dayObj) => {
-    if (dayObj.manualPilotos) return dayObj.manualPilotos;
-
     const pilotosEnLista = (dayObj.tripulacion || []).filter(
       t => (t.rol === 'CP' || t.rol === 'FO') && (!t.duty || t.duty === 'OP')
     ).length;
@@ -130,22 +185,11 @@ export default function App() {
     const tieneUSH = rutasTexto.includes('USH');
     const tieneFTE = rutasTexto.includes('FTE');
 
-    // Regla 1: Todos los AEP/EZE - USH - FTE o viceversa van con 3 pilotos
     if (tieneUSH && tieneFTE) return 3;
 
-    // Regla 2: Vuelos a LIM, SSA y regionales largos configurados
     for (const dest of DESTINOS_TRES_PILOTOS) {
       if (rutasTexto.includes(dest)) return 3;
     }
-
-    // Regla 3: Si el Tiempo de Vuelo total programado supera las 8 horas (480 min)
-    let totalTvMin = 0;
-    (dayObj.tramos || []).forEach(t => {
-      if (t.comienzoRaw && t.finRaw && t.comienzoRaw !== '-' && t.finRaw !== '-') {
-        totalTvMin += diffMinutes(t.comienzoRaw, t.finRaw);
-      }
-    });
-    if (totalTvMin > 480) return 3;
 
     return 2;
   };
@@ -175,9 +219,8 @@ export default function App() {
       maxTsvMinutos -= (cantidadTramos - 2) * 30;
     }
 
-    // Si son 3 pilotos (Tripulación Reforzada), extiende el TSV según convenio
     if (cantPilotos >= 3) {
-      maxTsvMinutos = 15 * 60; // Límite operativo extendido para 3 pilotos en B737
+      maxTsvMinutos = 15 * 60;
     }
 
     const totalMin = presMinutos + maxTsvMinutos;
@@ -287,18 +330,6 @@ export default function App() {
     });
   };
 
-  // Alternar manualmente entre 2 y 3 pilotos en un vuelo específico
-  const toggleManualPilotos = async (flightDay) => {
-    const nuevoValor = flightDay.cantPilotos >= 3 ? 2 : 3;
-    const updatedRoster = recalculateExistingCards(
-      rosterData.map(d => d.fechaDia === flightDay.fechaDia ? { ...d, manualPilotos: nuevoValor } : d)
-    );
-    setRosterData(updatedRoster);
-    await AsyncStorage.setItem('rosterData', JSON.stringify(updatedRoster));
-    const refreshed = updatedRoster.find(d => d.fechaDia === flightDay.fechaDia);
-    if (refreshed) setSelectedFlight(refreshed);
-  };
-
   const processAerowebToCards = (rawData) => {
     if (!rawData || rawData.length === 0) return [];
     const daysMap = {};
@@ -342,6 +373,9 @@ export default function App() {
           tripulacion: [],
           pickupTime: item.pickupTime || null,
           pickupAddress: item.pickupAddress || null,
+          pickupBase: item.pickupBase || null,
+          pickupStatus: item.pickupStatus || null,
+          flightStatus: item.flightStatus || null,
           isSpecialDay: isSpecial,
           specialName: isSpecial ? getSpecialActivityName(item.actividad) : null,
           isRPT: false,
@@ -363,6 +397,9 @@ export default function App() {
 
       if (item.pickupTime) daysMap[dateKey].pickupTime = item.pickupTime;
       if (item.pickupAddress) daysMap[dateKey].pickupAddress = item.pickupAddress;
+      if (item.pickupBase) daysMap[dateKey].pickupBase = item.pickupBase;
+      if (item.pickupStatus) daysMap[dateKey].pickupStatus = item.pickupStatus;
+      if (item.flightStatus) daysMap[dateKey].flightStatus = item.flightStatus;
 
       if (!isSpecial) {
         daysMap[dateKey].isSpecialDay = false; 
@@ -394,7 +431,6 @@ export default function App() {
   const todayMs = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
   const tomorrowMs = todayMs + 86400000;
 
-  // Si el vuelo es hoy -> IndexPost. Si es mañana -> MananaPost
   const getPickupTargetUrl = (fechaDia) => {
     const flightMs = getMsFromDateStr(fechaDia);
     if (flightMs === todayMs) {
@@ -403,7 +439,6 @@ export default function App() {
     return URL_PICKUP_MANANA;
   };
 
-  // Habilitado durante todo el día de hoy para vuelos de hoy (IndexPost) o de mañana (MananaPost)
   const isAutogestionAvailable = (fechaDia) => {
     if (!fechaDia) return false;
     const flightMs = getMsFromDateStr(fechaDia);
@@ -428,9 +463,10 @@ export default function App() {
         if (prev) {
           if (!c.pickupTime && prev.pickupTime) c.pickupTime = prev.pickupTime;
           if (!c.pickupAddress && prev.pickupAddress) c.pickupAddress = prev.pickupAddress;
-          if (prev.manualPilotos) c.manualPilotos = prev.manualPilotos;
-          // Si el plan general trajo menos tripulantes que los que ya habíamos extraído de Autogestión, preservar la lista completa
-          if ((!c.tripulacion || c.tripulacion.length <= 1) && prev.tripulacion && prev.tripulacion.length > 1) {
+          if (!c.pickupBase && prev.pickupBase) c.pickupBase = prev.pickupBase;
+          if (!c.pickupStatus && prev.pickupStatus) c.pickupStatus = prev.pickupStatus;
+          if (!c.flightStatus && prev.flightStatus) c.flightStatus = prev.flightStatus;
+          if ((!c.tripulacion || c.tripulacion.length < (prev.tripulacion?.length || 0)) && prev.tripulacion?.length > 1) {
             c.tripulacion = prev.tripulacion;
           }
         }
@@ -459,7 +495,6 @@ export default function App() {
             (!updatedOrig[existingOrigIndex].tripulacion || updatedOrig[existingOrigIndex].tripulacion.length <= 1) &&
             day.tripulacion && day.tripulacion.length > 1
           ) {
-            // Guardar la primera tripulación completa conocida como referencia original
             updatedOrig[existingOrigIndex].tripulacion = day.tripulacion;
           }
         });
@@ -469,6 +504,14 @@ export default function App() {
 
       groupedRealizada = compararConOriginal(groupedRealizada, originalCards);
 
+      // Disparar notificación si hubo algún cambio nuevo respecto a la última lectura
+      await notificarNuevosCambios(existingMonthCards, groupedRealizada);
+
+      const nowTime = new Date();
+      const timeFormatted = `${String(nowTime.getHours()).padStart(2, '0')}:${String(nowTime.getMinutes()).padStart(2, '0')}`;
+      setLastSyncTimeStr(timeFormatted);
+      await AsyncStorage.setItem('lastSyncTimeStr', timeFormatted);
+
       setRosterData(groupedRealizada);
       await AsyncStorage.setItem('rosterData', JSON.stringify(groupedRealizada));
 
@@ -477,6 +520,32 @@ export default function App() {
         if (refreshedSelected) setSelectedFlight(refreshedSelected);
       }
     }
+  };
+
+  const notificarNuevosCambios = async (previousCards, updatedCards) => {
+    try {
+      const prevMap = {};
+      (previousCards || []).forEach(c => {
+        prevMap[c.fechaDia] = (c.cambiosDetectados || []).join('|');
+      });
+
+      for (const day of updatedCards) {
+        const currentChanges = day.cambiosDetectados || [];
+        const currentSignature = currentChanges.join('|');
+        const prevSignature = prevMap[day.fechaDia] || '';
+
+        if (currentChanges.length > 0 && currentSignature !== prevSignature) {
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: `✈️ Modificación en tu vuelo del ${day.fechaDia}`,
+              body: currentChanges.join('\n'),
+              sound: true
+            },
+            trigger: null
+          });
+        }
+      }
+    } catch (e) {}
   };
 
   const compararConOriginal = (currentCards, originalCards) => {
@@ -525,7 +594,7 @@ export default function App() {
     });
   };
 
-  // Script inyectado en IndexPost / MananaPost: hace login, abre acordeón de Tripulación y extrae CAT, DUTY y TRIPULANTE + Pick Up
+  // Script inyectado en el WebView dentro de "Pick up, detalle del vuelo Aeroweb"
   const pickupInjectedJS = `
     (function() {
       function parseAutogestionPage() {
@@ -552,49 +621,68 @@ export default function App() {
             return;
           }
 
-          // Expandir paneles colapsados de Bootstrap en MananaPost / IndexPost si están cerrados
-          if (!window._panelsExpanded) {
-            var links = document.querySelectorAll('a, button, div[data-toggle="collapse"]');
-            links.forEach(function(el) {
-              var txt = (el.innerText || '').toLowerCase();
-              if (txt.includes('tripulaci') || txt.includes('búsqueda') || txt.includes('busqueda')) {
-                try { el.click(); } catch(e) {}
+          var bodyTxt = document.body ? (document.body.textContent || document.body.innerText) : '';
+          if (bodyTxt.length > 120 && !pass) {
+            // 1. Extraer todos los tripulantes (usando textContent para leer las 5 filas aunque el acordeón esté cerrado)
+            var extractedCrew = [];
+            var rows = document.querySelectorAll('table tr');
+            rows.forEach(function(row) {
+              var cells = row.querySelectorAll('td');
+              if (cells.length >= 3) {
+                var cat = (cells[0].textContent || '').trim().toUpperCase();
+                var duty = (cells[1].textContent || '').trim().toUpperCase();
+                var nombre = (cells[2].textContent || '').trim().replace(/\\s+/g, ' ');
+                if (['CP', 'FO', 'CM', 'AX', 'TC', 'JP'].includes(cat) && nombre.length > 2) {
+                  if (!extractedCrew.some(function(c) { return c.rol === cat && c.nombre === nombre; })) {
+                    extractedCrew.push({ rol: cat, duty: duty, nombre: nombre });
+                  }
+                }
               }
             });
-            window._panelsExpanded = true;
-          }
 
-          // 1. Extraer tabla de Tripulación (CAT | DUTY | TRIPULANTE) como en IMG_4116
-          var extractedCrew = [];
-          var rows = document.querySelectorAll('table tr');
-          rows.forEach(function(row) {
-            var cells = row.querySelectorAll('td');
-            if (cells.length >= 3) {
-              var cat = (cells[0].innerText || '').trim().toUpperCase();
-              var duty = (cells[1].innerText || '').trim().toUpperCase();
-              var nombre = (cells[2].innerText || '').trim();
-              if (['CP', 'FO', 'CM', 'AX', 'TC'].includes(cat) && nombre.length > 3) {
-                extractedCrew.push({ rol: cat, duty: duty, nombre: nombre });
+            // 2. Extraer Horario de búsqueda programado (ej: 05:10), Domicilio, Base y Estado
+            var pkMatch = bodyTxt.match(/Horario\\s*de\\s*b[uú]squeda(?:\\s*programado)?\\s*:\\s*(\\d{2}:\\d{2})/i)
+                       || bodyTxt.match(/(?:Pick\\s*Up|Remis)\\s*:\\s*(\\d{2}:\\d{2})/i);
+            var dirMatch = bodyTxt.match(/Domicilio\\s*:\\s*([^\\n\\r]+?)(?=\\s*Base:|\\s*Hora|$)/i);
+            var baseMatch = bodyTxt.match(/Base\\s*:\\s*([^\\n\\r]+?)(?=\\s*Estado|\\s*El viaje|$)/i);
+            var statusMovilMatch = bodyTxt.match(/(VIAJE\\s+VALIDADO[^\\n\\r]*|VEH[IÍ]CULO\\s+ASIGNADO[^\\n\\r]*)/i);
+
+            // 3. Extraer Estado del vuelo (Equipo: 73W y clases W / Y)
+            var eqMatch = bodyTxt.match(/Estado\\s*del\\s*vuelo\\s*:\\s*(\\d+)\\s*-\\s*Equipo\\s*:\\s*([A-Z0-9]+)/i);
+            var cabinClasses = [];
+            rows.forEach(function(r) {
+              var cTds = r.querySelectorAll('td');
+              if (cTds.length === 5) {
+                var orig = (cTds[0].textContent || '').trim();
+                var clase = (cTds[1].textContent || '').trim();
+                var cap = (cTds[2].textContent || '').trim();
+                var booked = (cTds[3].textContent || '').trim();
+                var disp = (cTds[4].textContent || '').trim();
+                if ((clase === 'W' || clase === 'Y' || clase === 'C') && !isNaN(parseInt(cap))) {
+                  cabinClasses.push({ origen: orig, clase: clase, capacidad: cap, booked: booked, disponibles: disp });
+                }
               }
+            });
+
+            if (extractedCrew.length > 0 || pkMatch || dirMatch || cabinClasses.length > 0) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'autogestion_extracted',
+                pickupTime: pkMatch ? pkMatch[1] : null,
+                pickupAddress: dirMatch ? dirMatch[1].trim() : null,
+                pickupBase: baseMatch ? baseMatch[1].trim() : null,
+                pickupStatus: statusMovilMatch ? statusMovilMatch[1].trim() : null,
+                flightStatus: (eqMatch || cabinClasses.length > 0) ? {
+                  vuelo: eqMatch ? eqMatch[1] : '',
+                  equipo: eqMatch ? eqMatch[2] : '',
+                  clases: cabinClasses
+                } : null,
+                crew: extractedCrew
+              }));
             }
-          });
-
-          // 2. Extraer Pick Up Time y Dirección
-          var txt = document.body ? document.body.innerText : '';
-          var pkMatch = txt.match(/(?:Pick\\s*Up|B[uú]squeda|Remis|Hora\\s*de\\s*b[uú]squeda)[^\\d]*(\\d{2}:\\d{2})/i);
-          var dirMatch = txt.match(/(?:Direcci[oó]n|Domicilio|Lugar)[^:\\n]*[:\\s]+([^\\n\\r]{5,60})/i);
-
-          if (extractedCrew.length > 0 || pkMatch || dirMatch) {
-            window.ReactNativeWebView.postMessage(JSON.stringify({
-              type: 'autogestion_extracted',
-              pickupTime: pkMatch ? pkMatch[1] : null,
-              pickupAddress: dirMatch ? dirMatch[1].trim() : null,
-              crew: extractedCrew
-            }));
           }
         } catch(e) {}
       }
-      setInterval(parseAutogestionPage, 1500);
+      setInterval(parseAutogestionPage, 1400);
     })();
     true;
   `;
@@ -619,10 +707,12 @@ export default function App() {
           ...selectedFlight,
           pickupTime: data.pickupTime || selectedFlight.pickupTime,
           pickupAddress: data.pickupAddress || selectedFlight.pickupAddress,
+          pickupBase: data.pickupBase || selectedFlight.pickupBase,
+          pickupStatus: data.pickupStatus || selectedFlight.pickupStatus,
+          flightStatus: data.flightStatus || selectedFlight.flightStatus,
           tripulacion: formattedCrew
         };
 
-        // Guardar referencia original si no tenía tripulación completa y comparar cambios
         const savedOrigRaw = await AsyncStorage.getItem('rosterOriginal');
         let origCards = savedOrigRaw ? JSON.parse(savedOrigRaw) : [];
         const origIdx = origCards.findIndex(o => o.fechaDia === updatedFlight.fechaDia);
@@ -743,11 +833,6 @@ export default function App() {
             <Text style={styles.flightCardDate}>{item.fechaDia}</Text>
             <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
               <View style={styles.badgeFlotaContainer}><Text style={styles.badgeFlotaText}>{item.flota}</Text></View>
-              {item.cantPilotos >= 3 && (
-                <View style={[styles.badgeFlotaContainer, { backgroundColor: '#0284C7' }]}>
-                  <Text style={styles.badgeFlotaText}>3 PILOTOS</Text>
-                </View>
-              )}
             </View>
           </View>
           <View style={styles.flightCardHeaderRight}>
@@ -841,18 +926,34 @@ export default function App() {
         <View>
           <Text style={styles.headerTitle}>PLANES</Text>
           <Text style={styles.headerSubtitle}>
-            {userProfileState?.nombre ? `${userProfileState.nombre} (${userProfileState.rank || 'B737'})` : 'B737 Aerolíneas'}
+            {userProfileState?.nombre ? `${userProfileState.nombre}` : 'B737 Aerolíneas'}
+            {lastSyncTimeStr ? ` • Sync ${lastSyncTimeStr}` : ''}
           </Text>
         </View>
         <View style={styles.headerButtons}>
-          <TouchableOpacity style={styles.syncBtn} onPress={() => setSyncModalVisible(true)}>
-            <Text style={styles.syncBtnText}>{syncModalVisible ? 'ACTUALIZANDO' : 'Actualizar'}</Text>
+          <TouchableOpacity
+            style={styles.syncBtn}
+            onPress={() => {
+              setSilentSyncRunning(false);
+              setSyncModalVisible(true);
+            }}
+          >
+            <Text style={styles.syncBtnText}>Actualizar</Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.profileBadgeBtn} onPress={() => setProfileModalVisible(true)}>
             <Text style={styles.profileBadgeText}>Perfil 👤</Text>
           </TouchableOpacity>
         </View>
       </View>
+
+      {/* Sincronizador silencioso en segundo plano cada 15 minutos */}
+      {silentSyncRunning && !syncModalVisible && !modalVisible && (
+        <AerowebSyncScreen
+          silentMode={true}
+          onClose={() => setSilentSyncRunning(false)}
+          onDataParsed={handleDataParsed}
+        />
+      )}
 
       <ScrollView contentContainerStyle={styles.scrollContent}>
         
@@ -869,7 +970,11 @@ export default function App() {
             {todayActivity ? (
               todayActivity.isSpecialDay 
                 ? renderGlobito(todayActivity) 
-                : renderFlightCard(todayActivity, 'today', () => { setSelectedFlight(todayActivity); setModalVisible(true); })
+                : renderFlightCard(todayActivity, 'today', () => {
+                    setSelectedFlight(todayActivity);
+                    setModalViewMode('detail');
+                    setModalVisible(true);
+                  })
             ) : (
               <Text style={styles.noActivityText}>No tenés actividad programada para hoy.</Text>
             )}
@@ -878,7 +983,11 @@ export default function App() {
             {nextActivity ? (
               nextActivity.isSpecialDay 
                 ? renderGlobito(nextActivity)
-                : renderFlightCard(nextActivity, 'next', () => { setSelectedFlight(nextActivity); setModalVisible(true); })
+                : renderFlightCard(nextActivity, 'next', () => {
+                    setSelectedFlight(nextActivity);
+                    setModalViewMode('detail');
+                    setModalVisible(true);
+                  })
             ) : (
               <View style={styles.emptyCard}><Text style={styles.summaryText}>No hay vuelos próximos. Tocá "Actualizar".</Text></View>
             )}
@@ -892,7 +1001,11 @@ export default function App() {
                 <Text style={[styles.toggleText, activityView === 'roster' && styles.toggleTextActive]}>≡ Roster ({rosterData.length})</Text>
               </TouchableOpacity>
             </View>
-            {rosterOrdenado.map((item, index) => item.isSpecialDay ? renderActividadSpecialCard(item, index) : renderFlightCard(item, index, () => { setSelectedFlight(item); setModalVisible(true); }))}
+            {rosterOrdenado.map((item, index) => item.isSpecialDay ? renderActividadSpecialCard(item, index) : renderFlightCard(item, index, () => {
+              setSelectedFlight(item);
+              setModalViewMode('detail');
+              setModalVisible(true);
+            }))}
           </View>
         )}
 
@@ -963,235 +1076,297 @@ export default function App() {
         />
       </Modal>
 
-      {/* MODAL DETALLE DE JORNADA */}
+      {/* MODAL ÚNICO CON DETALLE DE JORNADA Y VISTA "PICK UP, DETALLE DEL VUELO AEROWEB" INTEGRADA */}
       <Modal visible={modalVisible} animationType="slide" transparent={false}>
         <SafeAreaView style={styles.modalContainer}>
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Detalle de Jornada</Text>
-            <TouchableOpacity onPress={() => setModalVisible(false)} style={styles.closeButton}><Text style={styles.closeButtonText}>✕</Text></TouchableOpacity>
-          </View>
-          <ScrollView style={{ padding: 20 }}>
-            <Text style={styles.bigDate}>{selectedFlight.fechaDia}</Text>
-            
-            {(selectedFlight.isRPT || (selectedFlight.cambiosDetectados && selectedFlight.cambiosDetectados.length > 0)) && (
-              <View style={{ 
-                backgroundColor: selectedFlight.rptType === 'DELAY' ? '#FEF3C7' : '#FEE2E2', 
-                padding: 12, 
-                borderRadius: 8, 
-                marginBottom: 15, 
-                borderWidth: 1, 
-                borderColor: selectedFlight.rptType === 'DELAY' ? '#F59E0B' : '#FCA5A5' 
-              }}>
-                <Text style={{ color: selectedFlight.rptType === 'DELAY' ? '#92400E' : '#991B1B', fontWeight: 'bold', fontSize: 14, marginBottom: 4 }}>
-                  🔔 Modificaciones respecto al Plan Original
-                </Text>
-                {selectedFlight.cambiosDetectados && selectedFlight.cambiosDetectados.map((cambio, idx) => (
-                  <Text key={idx} style={{ color: selectedFlight.rptType === 'DELAY' ? '#B45309' : '#B91C1C', fontSize: 13, marginTop: 2, fontWeight: '600' }}>
-                    {cambio}
-                  </Text>
-                ))}
-              </View>
-            )}
-
-            <View style={styles.emptyCard}>
-              <Text style={styles.cardTitle}>Tramos Operados</Text>
-              {selectedFlight.tramos && selectedFlight.tramos.map((t, i) => {
-                let turnaroundText = null;
-                if (i > 0 && selectedFlight.tramos[i-1].finRaw && t.comienzoRaw) {
-                  turnaroundText = calcularTurnaround(selectedFlight.tramos[i-1].finRaw, t.comienzoRaw);
-                }
-                return (
-                  <View key={i}>
-                    {turnaroundText && (
-                      <View style={{ alignItems: 'center', marginVertical: 8 }}>
-                        <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 }}>
-                          <Text style={{ fontSize: 11, color: '#64748B', fontWeight: 'bold' }}>⏳ Turnaround: {turnaroundText}</Text>
-                        </View>
-                      </View>
-                    )}
-                    <View style={[styles.tramoRowModal, i > 0 && !turnaroundText && styles.borderTopTramo]}>
-                      <View><Text style={styles.flightCardRoute}>{t.ruta}</Text><Text style={styles.detailSub}>Vuelo: {t.nroVuelo}</Text></View>
-                      <View style={{ alignItems: 'flex-end' }}><Text style={styles.flightCardTime}>{t.horario}</Text></View>
-                    </View>
-                  </View>
-                );
-              })}
-            </View>
-
-            <View style={styles.emptyCard}>
-              <Text style={styles.cardTitle}>Horarios Operativos</Text>
-              <View style={styles.timeGridModal}>
-                <View>
-                  <Text style={styles.timeLabel}>PRESENTACIÓN</Text>
-                  <Text style={styles.timeVal}>{selectedFlight.presentacion}</Text>
-                </View>
-                <View>
-                  <Text style={styles.timeLabel}>VUELO (TV)</Text>
-                  <Text style={styles.timeVal}>{selectedFlight.tiempoVuelo || '0h 00m'}</Text>
-                </View>
-                <View>
-                  <Text style={styles.timeLabel}>T. DE SERVICIO</Text>
-                  <Text style={styles.timeVal}>{selectedFlight.tiempoServicio || '0h 00m'}</Text>
-                </View>
-              </View>
-
-              <TouchableOpacity
-                style={[
-                  styles.pickupBtn,
-                  !isAutogestionAvailable(selectedFlight.fechaDia) && { backgroundColor: '#64748B' }
-                ]}
-                onPress={() => {
-                  if (!isAutogestionAvailable(selectedFlight.fechaDia)) {
-                    Alert.alert(
-                      'Autogestión aún no disponible',
-                      'La pantalla de Autogestión (Pick Up, Mapa del Remis y Tripulación en vivo) está disponible el día anterior al vuelo (Actividad de Mañana) y el día del vuelo (Actividad de Hoy).'
-                    );
-                    return;
-                  }
-                  setRemisLoading(true);
-                  setRemisModalVisible(true);
-                }}
-              >
-                <Text style={styles.pickupBtnText}>
-                  🚕 {getMsFromDateStr(selectedFlight.fechaDia) === todayMs
-                    ? `Autogestión HOY: Pick Up (${selectedFlight.pickupTime || RestarUnaHora(selectedFlight.presentacion)}) y Mapa`
-                    : (getMsFromDateStr(selectedFlight.fechaDia) === tomorrowMs
-                      ? `Autogestión MAÑANA: Ver Pick Up y Tripulación`
-                      : 'Pick Up y Mapa (Disp. el día anterior y día del vuelo)')}
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.emptyCard}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <Text style={[styles.cardTitle, { marginBottom: 0 }]}>Límites y Seguridad</Text>
-                <TouchableOpacity
-                  style={{
-                    backgroundColor: selectedFlight.cantPilotos >= 3 ? '#0284C7' : '#E2E8F0',
-                    paddingHorizontal: 10,
-                    paddingVertical: 5,
-                    borderRadius: 8
-                  }}
-                  onPress={() => toggleManualPilotos(selectedFlight)}
-                >
-                  <Text style={{
-                    fontSize: 11,
-                    fontWeight: 'bold',
-                    color: selectedFlight.cantPilotos >= 3 ? '#FFFFFF' : '#334155'
-                  }}>
-                    {selectedFlight.cantPilotos >= 3 ? '👨‍✈️👨‍✈️👨‍✈️ 3 Pilotos (Cambiar)' : '👨‍✈️👨‍✈️ 2 Pilotos (Cambiar a 3)'}
-                  </Text>
+          {modalViewMode === 'detail' ? (
+            <>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Detalle de Jornada</Text>
+                <TouchableOpacity onPress={() => setModalVisible(false)} style={styles.closeButton}>
+                  <Text style={styles.closeButtonText}>✕</Text>
                 </TouchableOpacity>
               </View>
-              <Text style={styles.detailSub}>
-                Último posible aterrizaje: <Text style={{ fontWeight: 'bold', color: COLORS.primary }}>{selectedFlight.ultimoAterrizaje}</Text>
-              </Text>
-              <Text style={{ fontSize: 10, color: '#9CA3AF', marginTop: 4 }}>
-                * Calculado base TSV {selectedFlight.cantPilotos >= 3 ? 'Trip. Reforzada (3 Pilotos - USH/FTE, LIM, SSA o +8h)' : 'Trip. Simple (2 Pilotos)'}
-              </Text>
-            </View>
+              <ScrollView style={{ padding: 20 }}>
+                <Text style={styles.bigDate}>{selectedFlight.fechaDia}</Text>
+                
+                {(selectedFlight.isRPT || (selectedFlight.cambiosDetectados && selectedFlight.cambiosDetectados.length > 0)) && (
+                  <View style={{ 
+                    backgroundColor: selectedFlight.rptType === 'DELAY' ? '#FEF3C7' : '#FEE2E2', 
+                    padding: 12, 
+                    borderRadius: 8, 
+                    marginBottom: 15, 
+                    borderWidth: 1, 
+                    borderColor: selectedFlight.rptType === 'DELAY' ? '#F59E0B' : '#FCA5A5' 
+                  }}>
+                    <Text style={{ color: selectedFlight.rptType === 'DELAY' ? '#92400E' : '#991B1B', fontWeight: 'bold', fontSize: 14, marginBottom: 4 }}>
+                      🔔 Modificaciones respecto al Plan Original
+                    </Text>
+                    {selectedFlight.cambiosDetectados && selectedFlight.cambiosDetectados.map((cambio, idx) => (
+                      <Text key={idx} style={{ color: selectedFlight.rptType === 'DELAY' ? '#B45309' : '#B91C1C', fontSize: 13, marginTop: 2, fontWeight: '600' }}>
+                        {cambio}
+                      </Text>
+                    ))}
+                  </View>
+                )}
 
-            <View style={styles.emptyCard}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <Text style={[styles.cardTitle, { marginBottom: 0 }]}>Tripulación Asignada</Text>
-                {isAutogestionAvailable(selectedFlight.fechaDia) && (
+                <View style={styles.emptyCard}>
+                  <Text style={styles.cardTitle}>Tramos Operados</Text>
+                  {selectedFlight.tramos && selectedFlight.tramos.map((t, i) => {
+                    let turnaroundText = null;
+                    if (i > 0 && selectedFlight.tramos[i-1].finRaw && t.comienzoRaw) {
+                      turnaroundText = calcularTurnaround(selectedFlight.tramos[i-1].finRaw, t.comienzoRaw);
+                    }
+                    return (
+                      <View key={i}>
+                        {turnaroundText && (
+                          <View style={{ alignItems: 'center', marginVertical: 8 }}>
+                            <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 }}>
+                              <Text style={{ fontSize: 11, color: '#64748B', fontWeight: 'bold' }}>⏳ Turnaround: {turnaroundText}</Text>
+                            </View>
+                          </View>
+                        )}
+                        <View style={[styles.tramoRowModal, i > 0 && !turnaroundText && styles.borderTopTramo]}>
+                          <View><Text style={styles.flightCardRoute}>{t.ruta}</Text><Text style={styles.detailSub}>Vuelo: {t.nroVuelo}</Text></View>
+                          <View style={{ alignItems: 'flex-end' }}><Text style={styles.flightCardTime}>{t.horario}</Text></View>
+                        </View>
+                      </View>
+                    );
+                  })}
+                </View>
+
+                <View style={styles.emptyCard}>
+                  <Text style={styles.cardTitle}>Horarios Operativos</Text>
+                  <View style={styles.timeGridModal}>
+                    <View>
+                      <Text style={styles.timeLabel}>PRESENTACIÓN</Text>
+                      <Text style={styles.timeVal}>{selectedFlight.presentacion}</Text>
+                    </View>
+                    <View>
+                      <Text style={styles.timeLabel}>VUELO (TV)</Text>
+                      <Text style={styles.timeVal}>{selectedFlight.tiempoVuelo || '0h 00m'}</Text>
+                    </View>
+                    <View>
+                      <Text style={styles.timeLabel}>T. DE SERVICIO</Text>
+                      <Text style={styles.timeVal}>{selectedFlight.tiempoServicio || '0h 00m'}</Text>
+                    </View>
+                  </View>
+
                   <TouchableOpacity
+                    style={[
+                      styles.pickupBtn,
+                      !isAutogestionAvailable(selectedFlight.fechaDia) && { backgroundColor: '#64748B' }
+                    ]}
                     onPress={() => {
+                      if (!isAutogestionAvailable(selectedFlight.fechaDia)) {
+                        Alert.alert(
+                          'Disponible el día previo y día del vuelo',
+                          'El detalle de Pick up, Estado del vuelo y Búsqueda en Aeroweb se habilita el día anterior al vuelo y durante el día de operación.'
+                        );
+                        return;
+                      }
                       setRemisLoading(true);
-                      setRemisModalVisible(true);
+                      setModalViewMode('aeroweb');
                     }}
                   >
-                    <Text style={{ fontSize: 12, color: COLORS.primary, fontWeight: 'bold' }}>
-                      🔄 Sincronizar de Autogestión
+                    <Text style={styles.pickupBtnText}>
+                      🚕 Pick up, detalle del vuelo Aeroweb
                     </Text>
                   </TouchableOpacity>
-                )}
-              </View>
-              {selectedFlight.tripulacion && selectedFlight.tripulacion.length > 0 ? (
-                selectedFlight.tripulacion.map((trip, idx) => (
-                  <View key={idx} style={styles.crewRow}>
-                    {renderEpaulette(trip.rangType)}
-                    <View style={{ flex: 1, marginLeft: 12 }}>
-                      <Text style={styles.crewNameText}>{trip.nombre}</Text>
-                      <Text style={styles.crewRankText}>{trip.label} {trip.duty ? `(${trip.duty})` : ''}</Text>
-                    </View>
-                    <View style={styles.crewRoleBox}><Text style={styles.crewRoleText}>{trip.rol}</Text></View>
-                  </View>
-                ))
-              ) : (
-                <Text style={styles.detailSub}>
-                  Tocá el botón azul de Autogestión arriba para importar la tripulación completa de hoy/mañana.
-                </Text>
-              )}
-            </View>
-          </ScrollView>
-        </SafeAreaView>
-      </Modal>
-
-      {/* MODAL DE PICK UP TIME, TRIPULACIÓN Y MAPA EN VIVO CONECTADO A AUTOGESTIÓN */}
-      <Modal visible={remisModalVisible} animationType="slide">
-        <SafeAreaView style={styles.modalContainer}>
-          <View style={styles.modalHeader}>
-            <View>
-              <Text style={styles.modalTitle}>Autogestión Aerolíneas</Text>
-              <Text style={{ fontSize: 11, color: COLORS.textMuted }}>
-                {getMsFromDateStr(selectedFlight.fechaDia) === todayMs
-                  ? 'Actividad de Hoy (IndexPost) • Mapa y Remis en vivo'
-                  : 'Actividad de Mañana (MananaPost) • Pick Up y Tripulación'}
-              </Text>
-            </View>
-            <TouchableOpacity onPress={() => setRemisModalVisible(false)} style={styles.closeButton}>
-              <Text style={styles.closeButtonText}>✕</Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={{ paddingHorizontal: 16, paddingTop: 12 }}>
-            <View style={[styles.emptyCard, { marginBottom: 10, padding: 14 }]}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                <View>
-                  <Text style={styles.timeLabel}>FECHA VUELO</Text>
-                  <Text style={styles.timeVal}>{selectedFlight.fechaDia}</Text>
                 </View>
-                <View>
-                  <Text style={styles.timeLabel}>PICK UP</Text>
-                  <Text style={[styles.timeVal, { color: COLORS.primary }]}>
-                    {selectedFlight.pickupTime || RestarUnaHora(selectedFlight.presentacion)} hs
+
+                {/* LÍMITES Y SEGURIDAD LIMPIO */}
+                <View style={styles.emptyCard}>
+                  <Text style={styles.cardTitle}>Límites y Seguridad</Text>
+                  <Text style={styles.detailSub}>
+                    Último posible aterrizaje: <Text style={{ fontWeight: 'bold', color: COLORS.primary }}>{selectedFlight.ultimoAterrizaje}</Text>
                   </Text>
                 </View>
-                <View>
-                  <Text style={styles.timeLabel}>TRIPULANTES LEÍDOS</Text>
-                  <Text style={styles.timeVal}>{selectedFlight.tripulacion?.length || 0}</Text>
-                </View>
-              </View>
-              {selectedFlight.pickupAddress && (
-                <Text style={{ fontSize: 12, color: '#334155', marginTop: 8, fontWeight: '600' }}>
-                  📍 {selectedFlight.pickupAddress}
-                </Text>
-              )}
-            </View>
-          </View>
 
-          <View style={{ flex: 1, marginHorizontal: 16, marginBottom: 16, borderRadius: 14, overflow: 'hidden', borderWidth: 1, borderColor: COLORS.borderLight }}>
-            {remisLoading && (
-              <View style={{ padding: 12, backgroundColor: '#F8FAFC', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-                <ActivityIndicator size="small" color={COLORS.primary} />
-                <Text style={{ fontSize: 12, color: COLORS.textDark, fontWeight: '600' }}>
-                  Sincronizando Pick Up, Mapa y Tripulación...
-                </Text>
+                <View style={styles.emptyCard}>
+                  <Text style={styles.cardTitle}>
+                    Tripulación Asignada ({selectedFlight.tripulacion?.length || 0})
+                  </Text>
+                  {selectedFlight.tripulacion && selectedFlight.tripulacion.length > 0 ? (
+                    selectedFlight.tripulacion.map((trip, idx) => (
+                      <View key={idx} style={styles.crewRow}>
+                        {renderEpaulette(trip.rangType)}
+                        <View style={{ flex: 1, marginLeft: 12 }}>
+                          <Text style={styles.crewNameText}>{trip.nombre}</Text>
+                          <Text style={styles.crewRankText}>{trip.label} {trip.duty ? `(${trip.duty})` : ''}</Text>
+                        </View>
+                        <View style={styles.crewRoleBox}><Text style={styles.crewRoleText}>{trip.rol}</Text></View>
+                      </View>
+                    ))
+                  ) : (
+                    <Text style={styles.detailSub}>
+                      Tocá "Actualizar" o abrí "Pick up, detalle del vuelo Aeroweb" para ver la tripulación.
+                    </Text>
+                  )}
+                </View>
+              </ScrollView>
+            </>
+          ) : (
+            /* VISTA INTERNA: PICK UP, DETALLE DEL VUELO AEROWEB */
+            <>
+              <View style={styles.modalHeader}>
+                <TouchableOpacity
+                  onPress={() => setModalViewMode('detail')}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}
+                >
+                  <Text style={{ fontSize: 18, color: COLORS.primary, fontWeight: 'bold' }}>‹ Volver</Text>
+                </TouchableOpacity>
+                <Text style={styles.modalTitle}>Pick up, detalle Aeroweb</Text>
+                <TouchableOpacity onPress={() => setModalVisible(false)} style={styles.closeButton}>
+                  <Text style={styles.closeButtonText}>✕</Text>
+                </TouchableOpacity>
               </View>
-            )}
-            <WebView
-              ref={remisWebViewRef}
-              source={{ uri: getPickupTargetUrl(selectedFlight.fechaDia) }}
-              injectedJavaScript={pickupInjectedJS}
-              onMessage={handlePickupWebViewMessage}
-              onLoadEnd={() => setRemisLoading(false)}
-              sharedCookiesEnabled={true}
-              thirdPartyCookiesEnabled={true}
-              javaScriptEnabled={true}
-              domStorageEnabled={true}
-            />
-          </View>
+
+              <ScrollView style={{ padding: 16 }}>
+                {remisLoading && (
+                  <View style={{ padding: 10, backgroundColor: '#EFF6FF', borderRadius: 10, marginBottom: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                    <ActivityIndicator size="small" color={COLORS.primary} />
+                    <Text style={{ fontSize: 12, color: COLORS.primary, fontWeight: 'bold' }}>
+                      Actualizando datos en vivo desde Aeroweb...
+                    </Text>
+                  </View>
+                )}
+
+                {/* ACORDEÓN 1: HORARIO Y BÚSQUEDA DE TRIPULACIONES */}
+                <TouchableOpacity
+                  style={styles.aerowebBlueBar}
+                  onPress={() => setOpenAccordion(prev => ({ ...prev, pickup: !prev.pickup }))}
+                >
+                  <Text style={styles.aerowebBlueBarText}>🚗 Horario y búsqueda de tripulaciones</Text>
+                </TouchableOpacity>
+                {openAccordion.pickup && (
+                  <View style={styles.aerowebPanelBody}>
+                    <View style={styles.aerowebOrangeHeader}>
+                      <Text style={styles.aerowebOrangeHeaderText}>Próximo horario</Text>
+                    </View>
+                    <View style={styles.aerowebPickupBox}>
+                      <Text style={styles.aerowebPickupStatus}>
+                        {selectedFlight.pickupStatus || 'VIAJE VALIDADO - CONSULTANDO ESTADO DE ASIGNACIÓN'}
+                      </Text>
+                      <View style={{ height: 1, backgroundColor: 'rgba(255,255,255,0.25)', marginVertical: 8 }} />
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
+                        <Text style={styles.aerowebPickupText}>
+                          Horario de búsqueda: <Text style={{ fontWeight: 'bold' }}>{selectedFlight.pickupTime || RestarUnaHora(selectedFlight.presentacion)}</Text>
+                        </Text>
+                        <Text style={styles.aerowebPickupText}>
+                          Presentación: <Text style={{ fontWeight: 'bold' }}>{selectedFlight.presentacion}</Text>
+                        </Text>
+                      </View>
+                      <Text style={styles.aerowebPickupText}>
+                        Domicilio: <Text style={{ fontWeight: 'bold' }}>{selectedFlight.pickupAddress || 'Sincronizando domicilio...'}</Text>
+                      </Text>
+                      {selectedFlight.pickupBase && (
+                        <Text style={[styles.aerowebPickupText, { marginTop: 4 }]}>
+                          Base: <Text style={{ fontWeight: 'bold' }}>{selectedFlight.pickupBase}</Text>
+                        </Text>
+                      )}
+                    </View>
+                  </View>
+                )}
+
+                {/* ACORDEÓN 2: ESTADO DEL VUELO */}
+                <TouchableOpacity
+                  style={styles.aerowebBlueBar}
+                  onPress={() => setOpenAccordion(prev => ({ ...prev, flightStatus: !prev.flightStatus }))}
+                >
+                  <Text style={styles.aerowebBlueBarText}>✈️ Estado del vuelo</Text>
+                </TouchableOpacity>
+                {openAccordion.flightStatus && (
+                  <View style={styles.aerowebPanelBody}>
+                    <View style={styles.aerowebOrangeHeader}>
+                      <Text style={styles.aerowebOrangeHeaderText}>
+                        Estado del vuelo: {selectedFlight.flightStatus?.vuelo || selectedFlight.tramos?.[0]?.nroVuelo || ''} - Equipo: {selectedFlight.flightStatus?.equipo || selectedFlight.flota}
+                      </Text>
+                    </View>
+                    {selectedFlight.flightStatus?.clases && selectedFlight.flightStatus.clases.length > 0 ? (
+                      <View style={{ padding: 10 }}>
+                        <View style={{ flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#CBD5E1', paddingBottom: 6, marginBottom: 6 }}>
+                          <Text style={[styles.tableHeaderCell, { flex: 1 }]}>Origen</Text>
+                          <Text style={[styles.tableHeaderCell, { flex: 1 }]}>Clase</Text>
+                          <Text style={[styles.tableHeaderCell, { flex: 1 }]}>Capacidad</Text>
+                          <Text style={[styles.tableHeaderCell, { flex: 1 }]}>Booked</Text>
+                          <Text style={[styles.tableHeaderCell, { flex: 1 }]}>Disponibles</Text>
+                        </View>
+                        {selectedFlight.flightStatus.clases.map((cl, i) => (
+                          <View key={i} style={{ flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#F1F5F9' }}>
+                            <Text style={[styles.tableValCell, { flex: 1 }]}>{cl.origen}</Text>
+                            <Text style={[styles.tableValCell, { flex: 1, fontWeight: 'bold' }]}>{cl.clase}</Text>
+                            <Text style={[styles.tableValCell, { flex: 1 }]}>{cl.capacidad}</Text>
+                            <Text style={[styles.tableValCell, { flex: 1 }]}>{cl.booked}</Text>
+                            <Text style={[styles.tableValCell, { flex: 1, fontWeight: 'bold', color: COLORS.primary }]}>{cl.disponibles}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : (
+                      <Text style={{ padding: 12, fontSize: 12, color: '#64748B' }}>
+                        Cargando disponibilidad de asientos (W / Y) desde Aeroweb...
+                      </Text>
+                    )}
+                  </View>
+                )}
+
+                {/* ACORDEÓN 3: TRIPULACIÓN COMPLETA */}
+                <TouchableOpacity
+                  style={styles.aerowebBlueBar}
+                  onPress={() => setOpenAccordion(prev => ({ ...prev, crew: !prev.crew }))}
+                >
+                  <Text style={styles.aerowebBlueBarText}>
+                    👥 Tripulación ({selectedFlight.tripulacion?.length || 0})
+                  </Text>
+                </TouchableOpacity>
+                {openAccordion.crew && (
+                  <View style={styles.aerowebPanelBody}>
+                    <View style={styles.aerowebOrangeHeader}>
+                      <Text style={styles.aerowebOrangeHeaderText}>
+                        Tripulación del vuelo {selectedFlight.tramos?.[0]?.nroVuelo || ''}
+                      </Text>
+                    </View>
+                    <View style={{ padding: 10 }}>
+                      {(selectedFlight.tripulacion || []).map((trip, idx) => (
+                        <View key={idx} style={styles.crewRow}>
+                          {renderEpaulette(trip.rangType)}
+                          <View style={{ flex: 1, marginLeft: 12 }}>
+                            <Text style={styles.crewNameText}>{trip.nombre}</Text>
+                            <Text style={styles.crewRankText}>{trip.label} ({trip.duty || 'OP'})</Text>
+                          </View>
+                          <View style={styles.crewRoleBox}><Text style={styles.crewRoleText}>{trip.rol}</Text></View>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                )}
+
+                {/* ACORDEÓN 4: VER PÁGINA / MAPA DEL REMIS EN VIVO DE AEROWEB */}
+                <TouchableOpacity
+                  style={[styles.aerowebBlueBar, { backgroundColor: '#0F172A' }]}
+                  onPress={() => setOpenAccordion(prev => ({ ...prev, liveWeb: !prev.liveWeb }))}
+                >
+                  <Text style={styles.aerowebBlueBarText}>
+                    🗺️ {openAccordion.liveWeb ? 'Ocultar Mapa / Web de Aeroweb' : 'Ver Mapa del Auto / Web Original Aeroweb'}
+                  </Text>
+                </TouchableOpacity>
+
+                <View style={openAccordion.liveWeb ? styles.liveWebContainerVisible : styles.hiddenWebView}>
+                  <WebView
+                    ref={remisWebViewRef}
+                    source={{ uri: getPickupTargetUrl(selectedFlight.fechaDia) }}
+                    injectedJavaScript={pickupInjectedJS}
+                    onMessage={handlePickupWebViewMessage}
+                    onLoadEnd={() => setRemisLoading(false)}
+                    sharedCookiesEnabled={true}
+                    thirdPartyCookiesEnabled={true}
+                    javaScriptEnabled={true}
+                    domStorageEnabled={true}
+                  />
+                </View>
+              </ScrollView>
+            </>
+          )}
         </SafeAreaView>
       </Modal>
 
@@ -1208,7 +1383,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bgLight },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingTop: 15, paddingBottom: 10, backgroundColor: COLORS.cardBg, borderBottomWidth: 1, borderBottomColor: COLORS.borderLight },
   headerTitle: { fontSize: 22, fontWeight: 'bold', color: COLORS.primary },
-  headerSubtitle: { fontSize: 12, color: COLORS.textMuted },
+  headerSubtitle: { fontSize: 11, color: COLORS.textMuted },
   headerButtons: { flexDirection: 'row', gap: 8, alignItems: 'center' },
   syncBtn: { backgroundColor: COLORS.primary, paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20 },
   syncBtnText: { color: '#ffffff', fontSize: 13, fontWeight: 'bold' },
@@ -1295,7 +1470,7 @@ const styles = StyleSheet.create({
 
   modalContainer: { flex: 1, backgroundColor: COLORS.bgLight },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: COLORS.borderLight, backgroundColor: COLORS.cardBg },
-  modalTitle: { fontSize: 18, fontWeight: 'bold', color: COLORS.textDark },
+  modalTitle: { fontSize: 17, fontWeight: 'bold', color: COLORS.textDark },
   closeButton: { backgroundColor: '#f1f5f9', width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
   closeButtonText: { fontSize: 18, fontWeight: 'bold', color: '#475569' },
   bigDate: { fontSize: 32, fontWeight: 'bold', color: COLORS.textDark, marginBottom: 15 },
@@ -1306,8 +1481,21 @@ const styles = StyleSheet.create({
   timeLabel: { fontSize: 10, fontWeight: '700', color: COLORS.textMuted },
   timeVal: { fontSize: 15, fontWeight: 'bold', color: COLORS.textDark, marginTop: 2 },
 
-  pickupBtn: { backgroundColor: COLORS.primary, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 10, marginTop: 12, alignItems: 'center' },
-  pickupBtnText: { color: '#ffffff', fontWeight: 'bold', fontSize: 13 },
+  pickupBtn: { backgroundColor: COLORS.primary, paddingVertical: 13, paddingHorizontal: 14, borderRadius: 10, marginTop: 12, alignItems: 'center' },
+  pickupBtnText: { color: '#ffffff', fontWeight: 'bold', fontSize: 14 },
+
+  aerowebBlueBar: { backgroundColor: '#1E88E5', paddingVertical: 13, paddingHorizontal: 14, borderRadius: 8, marginBottom: 6, alignItems: 'center' },
+  aerowebBlueBarText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 14 },
+  aerowebPanelBody: { backgroundColor: '#FFFFFF', borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#CBD5E1', marginBottom: 14 },
+  aerowebOrangeHeader: { backgroundColor: '#D84315', paddingVertical: 8, paddingHorizontal: 12 },
+  aerowebOrangeHeaderText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 13 },
+  aerowebPickupBox: { backgroundColor: '#0277BD', margin: 12, padding: 14, borderRadius: 6 },
+  aerowebPickupStatus: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 12 },
+  aerowebPickupText: { color: '#FFFFFF', fontSize: 12 },
+  tableHeaderCell: { fontSize: 11, fontWeight: 'bold', color: '#334155' },
+  tableValCell: { fontSize: 12, color: '#1E293B' },
+  liveWebContainerVisible: { height: 460, borderRadius: 10, overflow: 'hidden', borderWidth: 1, borderColor: '#CBD5E1', marginBottom: 30 },
+  hiddenWebView: { width: 0, height: 0, opacity: 0, overflow: 'hidden' },
 
   tabBar: { flexDirection: 'row', position: 'absolute', bottom: 0, left: 0, right: 0, height: 65, backgroundColor: COLORS.cardBg, borderTopWidth: 1, borderTopColor: COLORS.borderLight, paddingBottom: 10 },
   tabItem: { flex: 1, justifyContent: 'center', alignItems: 'center' },
