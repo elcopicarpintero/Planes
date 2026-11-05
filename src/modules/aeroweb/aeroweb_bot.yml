@@ -1,0 +1,42 @@
+name: Aeroweb Sync Bot
+
+on:
+  schedule:
+    # Se ejecuta automáticamente cada 15 minutos las 24 hs
+    - cron: '*/15 * * * *'
+  workflow_dispatch: # Permite probarlo manualmente con un clic desde GitHub
+
+permissions:
+  contents: write
+
+jobs:
+  check-roster:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Instalar Playwright
+        run: |
+          npm init -y || true
+          npm install playwright
+          npx playwright install chromium
+
+      - name: Ejecutar Bot de Aeroweb
+        env:
+          AEROWEB_USER: ${{ secrets.AEROWEB_USER }}
+          AEROWEB_PASS: ${{ secrets.AEROWEB_PASS }}
+          EXPO_PUSH_TOKEN: ${{ secrets.EXPO_PUSH_TOKEN }}
+        run: node bot/checkAeroweb.js
+
+      - name: Guardar nuevo estado si hubo cambios en Aeroweb
+        run: |
+          git config --global user.name "Aeroweb Bot"
+          git config --global user.email "bot@planes.app"
+          git add bot/last_roster.json || true
+          git diff --staged --quiet || (git commit -m "chore: actualizar snapshot de Aeroweb" && git push)
