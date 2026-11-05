@@ -40,17 +40,11 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('hoy');
   const [modalVisible, setModalVisible] = useState(false);
   const [modalViewMode, setModalViewMode] = useState('detail'); // 'detail' | 'aeroweb'
+  const [aerowebTargetMode, setAerowebTargetMode] = useState('hoy'); // 'hoy' (24h) | 'manana' (48h)
   const [profileModalVisible, setProfileModalVisible] = useState(false);
   const [syncModalVisible, setSyncModalVisible] = useState(false);
   const [silentSyncRunning, setSilentSyncRunning] = useState(false);
   const [lastSyncTimeStr, setLastSyncTimeStr] = useState('');
-
-  const [openAccordion, setOpenAccordion] = useState({
-    pickup: true,
-    flightStatus: true,
-    crew: true,
-    liveWeb: false
-  });
 
   // Filas desplegables en la pestaña Viáticos
   const [expandedViaticos, setExpandedViaticos] = useState({
@@ -80,6 +74,8 @@ export default function App() {
   const todayStr = String(today.getDate()).padStart(2, '0');
   const aerowebMonths = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
   const mesesEspanol = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+  const diasSemanaCorto = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+  const diasSemanaLargo = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 
   useEffect(() => {
     const loadSavedData = async () => {
@@ -166,6 +162,26 @@ export default function App() {
     if (today.getMonth() === 11 && m === 0) y++;
     if (today.getMonth() === 0 && m === 11) y--;
     return new Date(y, m, d).getTime();
+  };
+
+  // Formatea "05NOV" -> "Jueves 05" o "Jueves 05 - Viernes 06" si toca dos días de servicio
+  const formatDayAndNumberHeader = (item) => {
+    if (!item || !item.fechaDia) return '';
+    const ms = getMsFromDateStr(item.fechaDia);
+    if (!ms) return item.fechaDia;
+
+    const dateObj = new Date(ms);
+    const dayName1 = diasSemanaLargo[dateObj.getDay()];
+    const dayNum1 = String(dateObj.getDate()).padStart(2, '0');
+
+    if (item.touchesNextDay) {
+      const nextDateObj = new Date(ms + 86400000);
+      const dayName2 = diasSemanaLargo[nextDateObj.getDay()];
+      const dayNum2 = String(nextDateObj.getDate()).padStart(2, '0');
+      return `${dayName1} ${dayNum1} - ${dayName2} ${dayNum2}`;
+    }
+
+    return `${dayName1} ${dayNum1}`;
   };
 
   const formatShortDateNum = (fechaDia) => {
@@ -280,7 +296,6 @@ export default function App() {
     return false;
   };
 
-  // Normativa CCT AR-877-2021 / ARSA-APLA-402-2000-E para Comida en Escala Internacional
   const correspondeComidaEscalaInternacional = (dayObj) => {
     if (dayObj.isSpecialDay || !dayObj.tramos || dayObj.tramos.length === 0) return false;
 
@@ -293,7 +308,6 @@ export default function App() {
     });
 
     if (!tocaEscalaIntl) return false;
-
     if (dayObj.tramos.length === 1) return true;
 
     const primerTramo = dayObj.tramos[0];
@@ -386,6 +400,12 @@ export default function App() {
     return ['D/L', 'VAC', '*', 'OF', 'RPT', 'GUA', 'ELD', 'CUR', 'INS', 'SIM'].includes(c) || c.startsWith('SB') || ['LIC', 'MED', 'SBF'].includes(c);
   };
 
+  const isOffOrFreeOrVacation = (item) => {
+    if (!item || !item.isSpecialDay) return false;
+    const name = (item.specialName || '').toLowerCase();
+    return name.includes('off') || name.includes('libre') || name.includes('vacaciones') || name.includes('licencia');
+  };
+
   const recalculateExistingCards = (cards) => {
     if (!cards || !Array.isArray(cards)) return [];
     const ordenJerarquia = { CP: 1, FO: 2, CM: 3, TC: 4, AX: 5 };
@@ -455,11 +475,6 @@ export default function App() {
           touchesNextDay: false,
           tramos: [],
           tripulacion: [],
-          pickupTime: item.pickupTime || null,
-          pickupAddress: item.pickupAddress || null,
-          pickupBase: item.pickupBase || null,
-          pickupStatus: item.pickupStatus || null,
-          flightStatus: item.flightStatus || null,
           isSpecialDay: isSpecial,
           specialName: isSpecial ? getSpecialActivityName(item.actividad) : null,
           isRPT: false,
@@ -515,6 +530,16 @@ export default function App() {
     return flightMs === todayMs || flightMs === tomorrowMs;
   };
 
+  const openDirectAerowebAutogestion = (flightItem) => {
+    const flightMs = getMsFromDateStr(flightItem?.fechaDia);
+    const mode = flightMs > todayMs ? 'manana' : 'hoy';
+    setSelectedFlight(flightItem || {});
+    setAerowebTargetMode(mode);
+    setRemisLoading(true);
+    setModalViewMode('aeroweb');
+    setModalVisible(true);
+  };
+
   const isFlightCompletedOrInProgress = (dayObj) => {
     const dayMs = getMsFromDateStr(dayObj.fechaDia);
     if (dayMs < todayMs) return true;
@@ -544,11 +569,6 @@ export default function App() {
       newCards.forEach(c => {
         const prev = mergedMap[c.fechaDia];
         if (prev) {
-          if (!c.pickupTime && prev.pickupTime) c.pickupTime = prev.pickupTime;
-          if (!c.pickupAddress && prev.pickupAddress) c.pickupAddress = prev.pickupAddress;
-          if (!c.pickupBase && prev.pickupBase) c.pickupBase = prev.pickupBase;
-          if (!c.pickupStatus && prev.pickupStatus) c.pickupStatus = prev.pickupStatus;
-          if (!c.flightStatus && prev.flightStatus) c.flightStatus = prev.flightStatus;
           if ((!c.tripulacion || c.tripulacion.length < (prev.tripulacion?.length || 0)) && prev.tripulacion?.length > 1) {
             c.tripulacion = prev.tripulacion;
           }
@@ -687,10 +707,14 @@ export default function App() {
     });
   };
 
-  const isSelectedTomorrow = getMsFromDateStr(selectedFlight.fechaDia) === tomorrowMs;
+  // Automatización directa en el WebView de Autogestión:
+  // 1) Si pide Legajo y DNI, los completa y envía el formulario
+  // 2) En la pantalla de los botones "24 ACTIVIDAD DE HOY" y "48 ACTIVIDAD DE MAÑANA" (Imagen 4),
+  //    toca automáticamente el botón correspondiente o navega a IndexPost / MananaPost.
+  const wantManana = aerowebTargetMode === 'manana';
   const pickupInjectedJS = `
     (function() {
-      function parseAutogestionPage() {
+      function runDirectAutogestion() {
         try {
           var url = window.location.href.toLowerCase();
           var pass = document.querySelector('input[type="password"]');
@@ -703,6 +727,7 @@ export default function App() {
             }
           }
 
+          // 1. Login automático con Legajo y DNI
           if (user && pass && !window._pickupLoginDone) {
             window._pickupLoginDone = true;
             user.value = "${userProfileState?.aerowebUser || ''}";
@@ -714,138 +739,39 @@ export default function App() {
             setTimeout(function() {
               var btn = document.querySelector('input[type="submit"], button[type="submit"], button');
               if (btn) btn.click();
-            }, 450);
+            }, 350);
             return;
           }
 
-          if (!pass && ${isSelectedTomorrow ? 'true' : 'false'} && !url.includes('mananapost') && !window._redirectedManana) {
-            window._redirectedManana = true;
-            window.location.href = "${URL_PICKUP_MANANA}";
-            return;
-          }
+          // 2. Si estamos en el menú de los botones "24 ACTIVIDAD DE HOY" / "48 ACTIVIDAD DE MAÑANA", tocar el botón automáticamente
+          if (!pass && !url.includes('indexpost') && !url.includes('mananapost') && !window._buttonClicked) {
+            var allClickables = document.querySelectorAll('a, button, input[type="submit"], input[type="button"], div, span');
+            for (var j = 0; j < allClickables.length; j++) {
+              var el = allClickables[j];
+              var txt = (el.innerText || el.value || el.textContent || '').toUpperCase().replace(/\\s+/g, ' ');
+              var href = (el.getAttribute && el.getAttribute('href')) ? el.getAttribute('href').toLowerCase() : '';
 
-          var bodyTxt = document.body ? (document.body.innerText || document.body.textContent) : '';
-          if (bodyTxt.length > 100 && !pass) {
-            if (!window._accordionsClicked) {
-              window._accordionsClicked = true;
-              var clickables = document.querySelectorAll('a, button, div[data-toggle="collapse"], .panel-heading a');
-              clickables.forEach(function(el) {
-                var txt = (el.innerText || el.textContent || '').toLowerCase();
-                if (txt.includes('búsqueda') || txt.includes('busqueda') || txt.includes('estado del vuelo') || txt.includes('tripulaci')) {
-                  try { el.click(); } catch(err) {}
+              if (${wantManana ? 'true' : 'false'}) {
+                if (href.includes('manana') || txt === 'ACTIVIDAD DE MAÑANA' || (txt.includes('48') && txt.includes('ACTIVIDAD DE MAÑANA'))) {
+                  window._buttonClicked = true;
+                  el.click();
+                  return;
                 }
-              });
+              } else {
+                if (href.includes('indexpost') || txt === 'ACTIVIDAD DE HOY' || (txt.includes('24') && txt.includes('ACTIVIDAD DE HOY'))) {
+                  window._buttonClicked = true;
+                  el.click();
+                  return;
+                }
+              }
             }
-
-            var fullDomText = (document.body.textContent || '').replace(/\\s+/g, ' ');
-
-            var extractedCrew = [];
-            var rows = document.querySelectorAll('table tr');
-            rows.forEach(function(row) {
-              var cells = row.querySelectorAll('td');
-              if (cells.length >= 3) {
-                var cat = (cells[0].textContent || '').trim().toUpperCase();
-                var duty = (cells[1].textContent || '').trim().toUpperCase();
-                var nombre = (cells[2].textContent || '').trim().replace(/\\s+/g, ' ');
-                if (['CP', 'FO', 'CM', 'AX', 'TC', 'JP'].includes(cat) && nombre.length > 2) {
-                  if (!extractedCrew.some(function(c) { return c.rol === cat && c.nombre === nombre; })) {
-                    extractedCrew.push({ rol: cat, duty: duty, nombre: nombre });
-                  }
-                }
-              }
-            });
-
-            var pkMatch = fullDomText.match(/Horario\\s*de\\s*b[uú]squeda\\s*programado\\s*:\\s*(\\d{2}:\\d{2})/i)
-                       || fullDomText.match(/Hora\\s*de\\s*b[uú]squeda\\s*:\\s*(\\d{2}:\\d{2})/i);
-            var dirMatch = fullDomText.match(/Domicilio\\s*:\\s*(.+?)(?=\\s*Base\\s*:|\\s*Hora\\s*de\\s*presentaci|$)/i);
-            var baseMatch = fullDomText.match(/Base\\s*:\\s*([A-Za-zÁÉÍÓÚÑáéíóúñ\\s]+?)(?=\\s*Estado|\\s*El viaje|\\s*Vuelo|$)/i);
-            var statusMovilMatch = fullDomText.match(/(VIAJE\\s+VALIDADO[^.\\n]*|VEH[IÍ]CULO\\s+ASIGNADO[^.\\n]*|SIN\\s+SOLICITUD[^.\\n]*)/i);
-
-            var eqMatch = fullDomText.match(/Estado\\s*del\\s*vuelo\\s*:\\s*([A-Z0-9]+)\\s*-\\s*Equipo\\s*:\\s*([A-Z0-9]+)/i);
-            var cabinClasses = [];
-            rows.forEach(function(r) {
-              var cTds = r.querySelectorAll('td');
-              if (cTds.length >= 5) {
-                var orig = (cTds[0].textContent || '').trim();
-                var clase = (cTds[1].textContent || '').trim();
-                var cap = (cTds[2].textContent || '').trim();
-                var booked = (cTds[3].textContent || '').trim();
-                var disp = (cTds[4].textContent || '').trim();
-                if ((clase === 'W' || clase === 'Y' || clase === 'C' || clase === 'J') && !isNaN(parseInt(cap))) {
-                  cabinClasses.push({ origen: orig, clase: clase, capacidad: cap, booked: booked, disponibles: disp });
-                }
-              }
-            });
-
-            window.ReactNativeWebView.postMessage(JSON.stringify({
-              type: 'autogestion_extracted',
-              pickupTime: pkMatch ? pkMatch[1] : null,
-              pickupAddress: dirMatch ? dirMatch[1].trim() : null,
-              pickupBase: baseMatch ? baseMatch[1].trim() : null,
-              pickupStatus: statusMovilMatch ? statusMovilMatch[1].trim() : null,
-              flightStatus: (eqMatch || cabinClasses.length > 0) ? {
-                vuelo: eqMatch ? eqMatch[1] : '',
-                equipo: eqMatch ? eqMatch[2] : '',
-                clases: cabinClasses
-              } : null,
-              crew: extractedCrew
-            }));
           }
         } catch(e) {}
       }
-      setInterval(parseAutogestionPage, 1200);
+      setInterval(runDirectAutogestion, 700);
     })();
     true;
   `;
-
-  const handlePickupWebViewMessage = async (event) => {
-    try {
-      const data = JSON.parse(event.nativeEvent.data);
-      if (data.type === 'autogestion_extracted') {
-        setRemisLoading(false);
-        let formattedCrew = selectedFlight.tripulacion || [];
-
-        if (data.crew && data.crew.length > 0) {
-          formattedCrew = data.crew.map(trip => ({
-            rol: trip.rol,
-            duty: trip.duty,
-            nombre: trip.nombre,
-            rangType: trip.rol === 'CP' ? '4_gold' : (trip.rol === 'FO' ? '3_gold' : (trip.rol === 'CM' ? '2_silver' : 'dots')),
-            label: trip.rol === 'CP' ? 'Comandante' : (trip.rol === 'FO' ? 'Primer Oficial' : (trip.rol === 'CM' ? 'Comisario' : 'Tripulante'))
-          }));
-        }
-
-        const updatedFlight = {
-          ...selectedFlight,
-          pickupTime: data.pickupTime || selectedFlight.pickupTime,
-          pickupAddress: data.pickupAddress || selectedFlight.pickupAddress,
-          pickupBase: data.pickupBase || selectedFlight.pickupBase,
-          pickupStatus: data.pickupStatus || selectedFlight.pickupStatus,
-          flightStatus: data.flightStatus || selectedFlight.flightStatus,
-          tripulacion: formattedCrew
-        };
-
-        const savedOrigRaw = await AsyncStorage.getItem('rosterOriginal');
-        let origCards = savedOrigRaw ? JSON.parse(savedOrigRaw) : [];
-        const origIdx = origCards.findIndex(o => o.fechaDia === updatedFlight.fechaDia);
-        if (origIdx !== -1 && (!origCards[origIdx].tripulacion || origCards[origIdx].tripulacion.length <= 1) && formattedCrew.length > 1) {
-          origCards[origIdx].tripulacion = formattedCrew;
-          await AsyncStorage.setItem('rosterOriginal', JSON.stringify(origCards));
-        }
-
-        let updatedRoster = rosterData.map(d =>
-          d.fechaDia === updatedFlight.fechaDia ? updatedFlight : d
-        );
-        updatedRoster = recalculateExistingCards(compararConOriginal(updatedRoster, origCards));
-
-        const refreshedFlight = updatedRoster.find(d => d.fechaDia === updatedFlight.fechaDia);
-        if (refreshedFlight) setSelectedFlight(refreshedFlight);
-
-        setRosterData(updatedRoster);
-        await AsyncStorage.setItem('rosterData', JSON.stringify(updatedRoster));
-      }
-    } catch (e) {}
-  };
 
   // =========================================================================
   // CÁLCULO DE VIÁTICOS Y TÍTULO DE MES ("noviembre 2026" / "a cobrar en enero")
@@ -946,7 +872,7 @@ export default function App() {
 
     return (
       <View style={[styles.globitoContainer, { backgroundColor: colorBg, opacity: isPast ? 0.5 : 1 }]}>
-        <Text style={[styles.globitoDate, { color: colorText }]}>{item.fechaDia}</Text>
+        <Text style={[styles.globitoDate, { color: colorText }]}>{formatDayAndNumberHeader(item)}</Text>
         <View style={styles.globitoSeparator} />
         <Text style={styles.globitoIcon}>{icon}</Text>
         <Text style={[styles.globitoText, { color: colorText }]}>{item.specialName}</Text>
@@ -962,7 +888,7 @@ export default function App() {
       <TouchableOpacity key={item.id || index} style={[styles.flightCard, { opacity: isPast ? 0.5 : 1 }]} onPress={onPress}>
         <View style={styles.flightCardHeader}>
           <View style={styles.flightCardHeaderLeft}>
-            <Text style={styles.flightCardDate}>{item.fechaDia}</Text>
+            <Text style={styles.flightCardDate}>{formatDayAndNumberHeader(item)}</Text>
             <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
               <View style={styles.badgeFlotaContainer}><Text style={styles.badgeFlotaText}>{item.flota}</Text></View>
             </View>
@@ -1006,7 +932,7 @@ export default function App() {
               fontWeight: 'bold' 
             }}>
               {item.rptType === 'DELAY'
-                ? `⚠️ ${item.cambiosDetectados[0]}`
+                ? `${item.cambiosDetectados[0]}`
                 : (item.rptType === 'ROUTE' ? '🔄 REPROGRAMADO' : `🔔 ${item.cambiosDetectados[0]}`)}
             </Text>
           </View>
@@ -1042,8 +968,8 @@ export default function App() {
     return (
       <View key={item.id || index} style={[styles.actividadSpecialCard, { borderLeftColor: colorLine, opacity: isPast ? 0.5 : 1 }]}>
         <View style={styles.actividadSpecialCardContent}>
-          <Text style={styles.actividadSpecialCardDate}>{item.fechaDia}</Text>
           <View style={{ flex: 1 }}>
+            <Text style={styles.actividadSpecialCardDate}>{formatDayAndNumberHeader(item)}</Text>
             <Text style={styles.actividadSpecialCardTitle}>{item.specialName}</Text>
             {simHorario && (
               <Text style={{ fontSize: 12, color: COLORS.primary, fontWeight: '600', marginTop: 2 }}>
@@ -1097,11 +1023,13 @@ export default function App() {
         
         {activeTab === 'hoy' && (
           <View>
+            {/* Ícono del calendario con el Día de la Semana ("Jueves") a la derecha */}
             <View style={styles.headerTitleContainer}>
               <View style={styles.calendarIcon}>
-                <Text style={styles.calendarDayName}>{['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'][today.getDay()]}</Text>
+                <Text style={styles.calendarDayName}>{diasSemanaCorto[today.getDay()]}</Text>
                 <Text style={styles.calendarDayNumber}>{todayStr}</Text>
               </View>
+              <Text style={styles.todayFullDayText}>{diasSemanaLargo[today.getDay()]}</Text>
             </View>
             
             <Text style={styles.sectionLabel}>Actividad de Hoy</Text>
@@ -1119,13 +1047,27 @@ export default function App() {
 
             <Text style={styles.sectionLabel}>Próxima actividad programada</Text>
             {nextActivity ? (
-              nextActivity.isSpecialDay 
-                ? renderGlobito(nextActivity)
-                : renderFlightCard(nextActivity, 'next', () => {
-                    setSelectedFlight(nextActivity);
-                    setModalViewMode('detail');
-                    setModalVisible(true);
-                  })
+              <View>
+                {nextActivity.isSpecialDay 
+                  ? renderGlobito(nextActivity)
+                  : renderFlightCard(nextActivity, 'next', () => {
+                      setSelectedFlight(nextActivity);
+                      setModalViewMode('detail');
+                      setModalVisible(true);
+                    })}
+
+                {/* Si la próxima actividad NO es OFF, Día Libre ni Vacaciones, mostramos el botón directo a Detalle Aeroweb */}
+                {!isOffOrFreeOrVacation(nextActivity) && (
+                  <TouchableOpacity
+                    style={[styles.pickupBtn, { marginTop: -4, marginBottom: 16 }]}
+                    onPress={() => openDirectAerowebAutogestion(nextActivity)}
+                  >
+                    <Text style={styles.pickupBtnText}>
+                      🚕 Detalle Aeroweb ({formatDayAndNumberHeader(nextActivity)})
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
             ) : (
               <View style={styles.emptyCard}><Text style={styles.summaryText}>No hay vuelos próximos. Tocá "Actualizar".</Text></View>
             )}
@@ -1431,7 +1373,7 @@ export default function App() {
                 </TouchableOpacity>
               </View>
               <ScrollView style={{ padding: 20 }}>
-                <Text style={styles.bigDate}>{selectedFlight.fechaDia}</Text>
+                <Text style={styles.bigDate}>{formatDayAndNumberHeader(selectedFlight)}</Text>
                 
                 {(selectedFlight.isRPT || (selectedFlight.cambiosDetectados && selectedFlight.cambiosDetectados.length > 0)) && (
                   <View style={{ 
@@ -1503,17 +1445,16 @@ export default function App() {
                     onPress={() => {
                       if (!isAutogestionAvailable(selectedFlight.fechaDia)) {
                         Alert.alert(
-                          'Disponible el día previo y día del vuelo',
-                          'El detalle de Pick up, Estado del vuelo y Búsqueda en Aeroweb se habilita el día anterior al vuelo y durante el día de operación.'
+                          'Disponible 24h / 48h en Aeroweb',
+                          'El portal de Autogestión Aeroweb muestra únicamente la Actividad de Hoy (24h) y la Actividad de Mañana (48h).'
                         );
                         return;
                       }
-                      setRemisLoading(true);
-                      setModalViewMode('aeroweb');
+                      openDirectAerowebAutogestion(selectedFlight);
                     }}
                   >
                     <Text style={styles.pickupBtnText}>
-                      🚕 Pick up, detalle del vuelo Aeroweb
+                      🚕 Detalle del vuelo Aeroweb
                     </Text>
                   </TouchableOpacity>
                 </View>
@@ -1542,14 +1483,15 @@ export default function App() {
                     ))
                   ) : (
                     <Text style={styles.detailSub}>
-                      Tocá "Actualizar" o abrí "Pick up, detalle del vuelo Aeroweb" para ver la tripulación.
+                      Tocá "Actualizar" para sincronizar la tripulación.
                     </Text>
                   )}
                 </View>
               </ScrollView>
             </>
           ) : (
-            <>
+            /* VISTA DIRECTA DE AUTOGESTIÓN AEROWEB (24H ACTIVIDAD DE HOY / 48H ACTIVIDAD DE MAÑANA) */
+            <View style={{ flex: 1 }}>
               <View style={styles.modalHeader}>
                 <TouchableOpacity
                   onPress={() => setModalViewMode('detail')}
@@ -1557,154 +1499,63 @@ export default function App() {
                 >
                   <Text style={{ fontSize: 18, color: COLORS.primary, fontWeight: 'bold' }}>‹ Volver</Text>
                 </TouchableOpacity>
-                <Text style={styles.modalTitle}>Pick up, detalle Aeroweb</Text>
+                <Text style={styles.modalTitle}>
+                  {aerowebTargetMode === 'manana' ? 'Aeroweb (48h Mañana)' : 'Aeroweb (24h Hoy)'}
+                </Text>
                 <TouchableOpacity onPress={() => setModalVisible(false)} style={styles.closeButton}>
                   <Text style={styles.closeButtonText}>✕</Text>
                 </TouchableOpacity>
               </View>
 
-              <ScrollView style={{ padding: 16 }}>
-                {remisLoading && (
-                  <View style={{ padding: 10, backgroundColor: '#EFF6FF', borderRadius: 10, marginBottom: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-                    <ActivityIndicator size="small" color={COLORS.primary} />
-                    <Text style={{ fontSize: 12, color: COLORS.primary, fontWeight: 'bold' }}>
-                      Conectando con Autogestión Aeroweb en vivo...
-                    </Text>
-                  </View>
-                )}
-
+              {/* Botones rápidos 24h / 48h arriba por si querés alternar directamente dentro de Aeroweb */}
+              <View style={{ flexDirection: 'row', gap: 10, paddingHorizontal: 14, paddingVertical: 8, backgroundColor: '#F1F5F9', borderBottomWidth: 1, borderBottomColor: '#E2E8F0' }}>
                 <TouchableOpacity
-                  style={styles.aerowebBlueBar}
-                  onPress={() => setOpenAccordion(prev => ({ ...prev, pickup: !prev.pickup }))}
+                  style={[styles.quickAerowebSwitch, aerowebTargetMode === 'hoy' && styles.quickAerowebSwitchActive]}
+                  onPress={() => {
+                    setAerowebTargetMode('hoy');
+                    remisWebViewRef.current?.injectJavaScript(`window.location.href = "${URL_PICKUP_HOY}"; true;`);
+                  }}
                 >
-                  <Text style={styles.aerowebBlueBarText}>🚗 Horario y búsqueda de tripulaciones</Text>
-                </TouchableOpacity>
-                {openAccordion.pickup && (
-                  <View style={styles.aerowebPanelBody}>
-                    <View style={styles.aerowebOrangeHeader}>
-                      <Text style={styles.aerowebOrangeHeaderText}>Próximo horario</Text>
-                    </View>
-                    <View style={styles.aerowebPickupBox}>
-                      <Text style={styles.aerowebPickupStatus}>
-                        {selectedFlight.pickupStatus || (remisLoading ? 'CONSULTANDO ESTADO EN AEROWEB...' : 'VIAJE VALIDADO - VEHÍCULO PENDIENTE DE ASIGNACIÓN')}
-                      </Text>
-                      <View style={{ height: 1, backgroundColor: 'rgba(255,255,255,0.25)', marginVertical: 8 }} />
-                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
-                        <Text style={styles.aerowebPickupText}>
-                          Horario de búsqueda: <Text style={{ fontWeight: 'bold' }}>{selectedFlight.pickupTime || (remisLoading ? 'Leyendo Aeroweb...' : 'Ver en Mapa / Web abajo')}</Text>
-                        </Text>
-                        <Text style={styles.aerowebPickupText}>
-                          Presentación: <Text style={{ fontWeight: 'bold' }}>{selectedFlight.presentacion}</Text>
-                        </Text>
-                      </View>
-                      <Text style={styles.aerowebPickupText}>
-                        Domicilio: <Text style={{ fontWeight: 'bold' }}>{selectedFlight.pickupAddress || (remisLoading ? 'Leyendo de Aeroweb...' : 'Ver en Mapa / Web abajo')}</Text>
-                      </Text>
-                      {selectedFlight.pickupBase && (
-                        <Text style={[styles.aerowebPickupText, { marginTop: 4 }]}>
-                          Base: <Text style={{ fontWeight: 'bold' }}>{selectedFlight.pickupBase}</Text>
-                        </Text>
-                      )}
-                    </View>
-                  </View>
-                )}
-
-                <TouchableOpacity
-                  style={styles.aerowebBlueBar}
-                  onPress={() => setOpenAccordion(prev => ({ ...prev, flightStatus: !prev.flightStatus }))}
-                >
-                  <Text style={styles.aerowebBlueBarText}>✈️ Estado del vuelo</Text>
-                </TouchableOpacity>
-                {openAccordion.flightStatus && (
-                  <View style={styles.aerowebPanelBody}>
-                    <View style={styles.aerowebOrangeHeader}>
-                      <Text style={styles.aerowebOrangeHeaderText}>
-                        Estado del vuelo: {selectedFlight.flightStatus?.vuelo || selectedFlight.tramos?.[0]?.nroVuelo || ''} - Equipo: {selectedFlight.flightStatus?.equipo || selectedFlight.flota}
-                      </Text>
-                    </View>
-                    {selectedFlight.flightStatus?.clases && selectedFlight.flightStatus.clases.length > 0 ? (
-                      <View style={{ padding: 10 }}>
-                        <View style={{ flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#CBD5E1', paddingBottom: 6, marginBottom: 6 }}>
-                          <Text style={[styles.tableHeaderCell, { flex: 1 }]}>Origen</Text>
-                          <Text style={[styles.tableHeaderCell, { flex: 1 }]}>Clase</Text>
-                          <Text style={[styles.tableHeaderCell, { flex: 1 }]}>Capacidad</Text>
-                          <Text style={[styles.tableHeaderCell, { flex: 1 }]}>Booked</Text>
-                          <Text style={[styles.tableHeaderCell, { flex: 1 }]}>Disponibles</Text>
-                        </View>
-                        {selectedFlight.flightStatus.clases.map((cl, i) => (
-                          <View key={i} style={{ flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#F1F5F9' }}>
-                            <Text style={[styles.tableValCell, { flex: 1 }]}>{cl.origen}</Text>
-                            <Text style={[styles.tableValCell, { flex: 1, fontWeight: 'bold' }]}>{cl.clase}</Text>
-                            <Text style={[styles.tableValCell, { flex: 1 }]}>{cl.capacidad}</Text>
-                            <Text style={[styles.tableValCell, { flex: 1 }]}>{cl.booked}</Text>
-                            <Text style={[styles.tableValCell, { flex: 1, fontWeight: 'bold', color: COLORS.primary }]}>{cl.disponibles}</Text>
-                          </View>
-                        ))}
-                      </View>
-                    ) : (
-                      <Text style={{ padding: 12, fontSize: 12, color: '#64748B' }}>
-                        {remisLoading
-                          ? 'Consultando disponibilidad de asientos (W / Y) en Aeroweb...'
-                          : 'Tocá "Ver Mapa del Auto / Web Original Aeroweb" abajo para ver el estado interactivo.'}
-                      </Text>
-                    )}
-                  </View>
-                )}
-
-                <TouchableOpacity
-                  style={styles.aerowebBlueBar}
-                  onPress={() => setOpenAccordion(prev => ({ ...prev, crew: !prev.crew }))}
-                >
-                  <Text style={styles.aerowebBlueBarText}>
-                    👥 Tripulación ({selectedFlight.tripulacion?.length || 0})
-                  </Text>
-                </TouchableOpacity>
-                {openAccordion.crew && (
-                  <View style={styles.aerowebPanelBody}>
-                    <View style={styles.aerowebOrangeHeader}>
-                      <Text style={styles.aerowebOrangeHeaderText}>
-                        Tripulación del vuelo {selectedFlight.tramos?.[0]?.nroVuelo || ''}
-                      </Text>
-                    </View>
-                    <View style={{ padding: 10 }}>
-                      {(selectedFlight.tripulacion || []).map((trip, idx) => (
-                        <View key={idx} style={styles.crewRow}>
-                          {renderEpaulette(trip.rangType)}
-                          <View style={{ flex: 1, marginLeft: 12 }}>
-                            <Text style={styles.crewNameText}>{trip.nombre}</Text>
-                            <Text style={styles.crewRankText}>{trip.label} ({trip.duty || 'OP'})</Text>
-                          </View>
-                          <View style={styles.crewRoleBox}><Text style={styles.crewRoleText}>{trip.rol}</Text></View>
-                        </View>
-                      ))}
-                    </View>
-                  </View>
-                )}
-
-                <TouchableOpacity
-                  style={[styles.aerowebBlueBar, { backgroundColor: '#0F172A' }]}
-                  onPress={() => setOpenAccordion(prev => ({ ...prev, liveWeb: !prev.liveWeb }))}
-                >
-                  <Text style={styles.aerowebBlueBarText}>
-                    🗺️ {openAccordion.liveWeb ? 'Ocultar Mapa / Web de Aeroweb' : 'Ver Mapa del Auto / Web Original Aeroweb'}
+                  <Text style={[styles.quickAerowebSwitchText, aerowebTargetMode === 'hoy' && { color: '#FFFFFF' }]}>
+                    ↺ 24 Actividad de Hoy
                   </Text>
                 </TouchableOpacity>
 
-                <View style={openAccordion.liveWeb ? styles.liveWebContainerVisible : styles.hiddenWebView}>
-                  <WebView
-                    ref={remisWebViewRef}
-                    source={{ uri: URL_AUTOGESTION_LOGIN }}
-                    injectedJavaScript={pickupInjectedJS}
-                    onMessage={handlePickupWebViewMessage}
-                    onLoadEnd={() => setTimeout(() => setRemisLoading(false), 1800)}
-                    sharedCookiesEnabled={true}
-                    thirdPartyCookiesEnabled={true}
-                    javaScriptEnabled={true}
-                    domStorageEnabled={true}
-                  />
+                <TouchableOpacity
+                  style={[styles.quickAerowebSwitch, aerowebTargetMode === 'manana' && styles.quickAerowebSwitchActive]}
+                  onPress={() => {
+                    setAerowebTargetMode('manana');
+                    remisWebViewRef.current?.injectJavaScript(`window.location.href = "${URL_PICKUP_MANANA}"; true;`);
+                  }}
+                >
+                  <Text style={[styles.quickAerowebSwitchText, aerowebTargetMode === 'manana' && { color: '#FFFFFF' }]}>
+                    ↺ 48 Actividad de Mañana
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {remisLoading && (
+                <View style={{ padding: 8, backgroundColor: '#EFF6FF', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                  <ActivityIndicator size="small" color={COLORS.primary} />
+                  <Text style={{ fontSize: 12, color: COLORS.primary, fontWeight: 'bold' }}>
+                    Ingresando a Autogestión Aeroweb...
+                  </Text>
                 </View>
-              </ScrollView>
-            </>
+              )}
+
+              <View style={{ flex: 1 }}>
+                <WebView
+                  ref={remisWebViewRef}
+                  source={{ uri: URL_AUTOGESTION_LOGIN }}
+                  injectedJavaScript={pickupInjectedJS}
+                  onLoadEnd={() => setRemisLoading(false)}
+                  sharedCookiesEnabled={true}
+                  thirdPartyCookiesEnabled={true}
+                  javaScriptEnabled={true}
+                  domStorageEnabled={true}
+                />
+              </View>
+            </View>
           )}
         </SafeAreaView>
       </Modal>
@@ -1730,10 +1581,11 @@ const styles = StyleSheet.create({
   profileBadgeText: { color: COLORS.primary, fontSize: 13, fontWeight: 'bold' },
   scrollContent: { padding: 20, paddingBottom: 100 },
   
-  headerTitleContainer: { flexDirection: 'row', alignItems: 'center', marginVertical: 10, gap: 12 },
+  headerTitleContainer: { flexDirection: 'row', alignItems: 'center', marginVertical: 10, gap: 14 },
   calendarIcon: { backgroundColor: COLORS.primary, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, alignItems: 'center', justifyContent: 'center' },
   calendarDayName: { fontSize: 10, color: '#ffffff', fontWeight: 'bold', textTransform: 'uppercase' },
   calendarDayNumber: { fontSize: 16, color: '#ffffff', fontWeight: 'bold' },
+  todayFullDayText: { fontSize: 22, fontWeight: 'bold', color: COLORS.textDark },
   noActivityText: { fontSize: 15, fontWeight: '600', color: '#64748B', marginVertical: 10 },
   sectionLabel: { fontSize: 14, fontWeight: '700', color: COLORS.primary, marginTop: 10, marginBottom: 12 },
 
@@ -1745,11 +1597,11 @@ const styles = StyleSheet.create({
 
   flightCard: { backgroundColor: COLORS.cardBg, borderRadius: 16, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: COLORS.borderLight, shadowColor: COLORS.textDark, shadowOpacity: 0.05, shadowRadius: 8 },
   flightCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 },
-  flightCardHeaderLeft: { flex: 1 },
-  flightCardDate: { fontSize: 18, fontWeight: 'bold', color: COLORS.textDark, marginBottom: 4 },
+  flightCardHeaderLeft: { flex: 1, paddingRight: 6 },
+  flightCardDate: { fontSize: 16, fontWeight: 'bold', color: COLORS.textDark, marginBottom: 4 },
   badgeFlotaContainer: { backgroundColor: COLORS.primary, alignSelf: 'flex-start', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
   badgeFlotaText: { color: '#ffffff', fontSize: 10, fontWeight: 'bold' },
-  flightCardHeaderRight: { marginLeft: 15, alignItems: 'center' },
+  flightCardHeaderRight: { marginLeft: 12, alignItems: 'center' },
   flightCardHeaderLabel: { fontSize: 10, color: COLORS.textMuted, fontWeight: '600', marginBottom: 2 },
   flightCardHeaderVal: { fontSize: 14, fontWeight: 'bold', color: COLORS.textDark },
   
@@ -1765,10 +1617,10 @@ const styles = StyleSheet.create({
   flightCardTime: { fontSize: 14, fontWeight: '600', color: COLORS.textDark },
 
   actividadSpecialCard: { backgroundColor: COLORS.cardBg, borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: COLORS.borderLight, borderLeftWidth: 6, shadowColor: COLORS.textDark, shadowOpacity: 0.03, shadowRadius: 4, elevation: 1 },
-  actividadSpecialCardContent: { flexDirection: 'row', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 16 },
-  actividadSpecialCardDate: { fontSize: 16, fontWeight: 'bold', color: COLORS.textDark, width: 85 },
-  actividadSpecialCardTitle: { fontSize: 15, color: COLORS.textMuted, fontWeight: '600' },
-  actividadSpecialCardIcon: { fontSize: 18, color: '#10B981' },
+  actividadSpecialCardContent: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 16 },
+  actividadSpecialCardDate: { fontSize: 15, fontWeight: 'bold', color: COLORS.textDark, marginBottom: 2 },
+  actividadSpecialCardTitle: { fontSize: 14, color: COLORS.textMuted, fontWeight: '600' },
+  actividadSpecialCardIcon: { fontSize: 18, color: '#10B981', marginLeft: 10 },
 
   emptyCard: { backgroundColor: COLORS.cardBg, borderRadius: 14, padding: 18, marginBottom: 15, borderWidth: 1, borderColor: COLORS.borderLight },
   cardTitle: { fontSize: 16, fontWeight: 'bold', color: COLORS.textDark, marginBottom: 8 },
@@ -1817,7 +1669,7 @@ const styles = StyleSheet.create({
   modalTitle: { fontSize: 17, fontWeight: 'bold', color: COLORS.textDark },
   closeButton: { backgroundColor: '#f1f5f9', width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
   closeButtonText: { fontSize: 18, fontWeight: 'bold', color: '#475569' },
-  bigDate: { fontSize: 32, fontWeight: 'bold', color: COLORS.textDark, marginBottom: 15 },
+  bigDate: { fontSize: 26, fontWeight: 'bold', color: COLORS.textDark, marginBottom: 15 },
   tramoRowModal: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8 },
   borderTopTramo: { borderTopWidth: 1, borderTopColor: '#f1f5f9', marginTop: 8 },
   detailSub: { fontSize: 13, color: '#475569', marginVertical: 2 },
@@ -1828,18 +1680,9 @@ const styles = StyleSheet.create({
   pickupBtn: { backgroundColor: COLORS.primary, paddingVertical: 13, paddingHorizontal: 14, borderRadius: 10, marginTop: 12, alignItems: 'center' },
   pickupBtnText: { color: '#ffffff', fontWeight: 'bold', fontSize: 14 },
 
-  aerowebBlueBar: { backgroundColor: '#1E88E5', paddingVertical: 13, paddingHorizontal: 14, borderRadius: 8, marginBottom: 6, alignItems: 'center' },
-  aerowebBlueBarText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 14 },
-  aerowebPanelBody: { backgroundColor: '#FFFFFF', borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#CBD5E1', marginBottom: 14 },
-  aerowebOrangeHeader: { backgroundColor: '#D84315', paddingVertical: 8, paddingHorizontal: 12 },
-  aerowebOrangeHeaderText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 13 },
-  aerowebPickupBox: { backgroundColor: '#0277BD', margin: 12, padding: 14, borderRadius: 6 },
-  aerowebPickupStatus: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 12 },
-  aerowebPickupText: { color: '#FFFFFF', fontSize: 12 },
-  tableHeaderCell: { fontSize: 11, fontWeight: 'bold', color: '#334155' },
-  tableValCell: { fontSize: 12, color: '#1E293B' },
-  liveWebContainerVisible: { height: 480, borderRadius: 10, overflow: 'hidden', borderWidth: 1, borderColor: '#CBD5E1', marginBottom: 30 },
-  hiddenWebView: { width: 0, height: 0, opacity: 0, overflow: 'hidden' },
+  quickAerowebSwitch: { flex: 1, paddingVertical: 8, paddingHorizontal: 10, borderRadius: 8, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#CBD5E1', alignItems: 'center' },
+  quickAerowebSwitchActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  quickAerowebSwitchText: { fontSize: 12, fontWeight: 'bold', color: '#334155' },
 
   tabBar: { flexDirection: 'row', position: 'absolute', bottom: 0, left: 0, right: 0, height: 65, backgroundColor: COLORS.cardBg, borderTopWidth: 1, borderTopColor: COLORS.borderLight, paddingBottom: 10 },
   tabItem: { flex: 1, justifyContent: 'center', alignItems: 'center' },
