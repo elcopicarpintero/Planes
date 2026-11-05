@@ -41,7 +41,6 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
         if (raw) activeProfile = JSON.parse(raw);
       }
 
-      // Detecta sesión activa (incluso si venía de una versión anterior sin email)
       if (activeProfile && (activeProfile.aerowebUser || activeProfile.email)) {
         setIsLoggedIn(true);
         setMode('edit');
@@ -79,7 +78,6 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
     }
 
     const db = await getAccountsDB();
-    // Permite ingresar por email o por legajo si ya estaba registrado
     let account = db[cleanKey];
     if (!account) {
       account = Object.values(db).find(
@@ -313,7 +311,7 @@ export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout
                 <Text style={styles.label}>Legajo Aerolíneas</Text>
                 <TextInput
                   style={styles.input}
-                  placeholder="Sin selección previa (Ej: 31451)"
+                  placeholder="Ingresá tu legajo"
                   placeholderTextColor="#94A3B8"
                   keyboardType="numeric"
                   value={aerowebUser}

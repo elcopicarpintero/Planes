@@ -21,7 +21,6 @@ import ProfileSetupScreen from './src/modules/auth/ProfileSetupScreen';
 import AerowebSyncScreen from './src/modules/aeroweb/AerowebSyncScreen';
 import { getEncryptedData } from './src/services/storage';
 
-// Configurar para que las notificaciones suenen y aparezcan como banner incluso con la app abierta
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -30,10 +29,12 @@ Notifications.setNotificationHandler({
   })
 });
 
+const URL_AUTOGESTION_LOGIN = 'https://ssl.aerolineas.com.ar/FORMS/ActividadesProgramadas/Autogestion';
 const URL_PICKUP_HOY = 'https://ssl.aerolineas.com.ar/FORMS/ActividadesProgramadas/Autogestion/IndexPost';
 const URL_PICKUP_MANANA = 'https://ssl.aerolineas.com.ar/FORMS/ActividadesProgramadas/Autogestion/MananaPost';
 
 const DESTINOS_TRES_PILOTOS = ['LIM', 'SSA', 'BOG', 'CUN', 'PUJ', 'MIA', 'MAD', 'FCO', 'JFK'];
+const DESTINOS_INTERNACIONALES = ['GIG', 'SCL', 'GRU', 'MVD', 'ASU', 'LIM', 'SSA', 'BOG', 'CUN', 'PUJ', 'MIA', 'MAD', 'FCO', 'JFK', 'FLN', 'POA', 'CUR', 'SDQ', 'VVI', 'PDP'];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('hoy');
@@ -44,13 +45,23 @@ export default function App() {
   const [silentSyncRunning, setSilentSyncRunning] = useState(false);
   const [lastSyncTimeStr, setLastSyncTimeStr] = useState('');
 
-  // Acordeones del detalle Aeroweb
   const [openAccordion, setOpenAccordion] = useState({
     pickup: true,
     flightStatus: true,
     crew: true,
     liveWeb: false
   });
+
+  // Filas desplegables en la pestaña Viáticos
+  const [expandedViaticos, setExpandedViaticos] = useState({
+    diasServicio: false,
+    vueloSinComida: true,
+    vueloConComida: true,
+    tierraSimu: false,
+    comidaInternacional: true
+  });
+  const [mostrarSoloRealizados, setMostrarSoloRealizados] = useState(true);
+  const [selectedViaticosMonth, setSelectedViaticosMonth] = useState(new Date().getMonth());
 
   const [activityView, setActivityView] = useState('roster');
   const [viaticosView, setViaticosView] = useState('cantidades');
@@ -119,7 +130,7 @@ export default function App() {
     registerForPushNotificationsAsync();
   }, []);
 
-  // Motor de actualización automática cada 15 minutos y cuando la app vuelve del fondo
+  // Chequeo automático silencioso cada 15 minutos
   useEffect(() => {
     if (!userProfileState?.aerowebUser) return;
 
@@ -127,7 +138,7 @@ export default function App() {
       if (!syncModalVisible && !silentSyncRunning && !modalVisible) {
         setSilentSyncRunning(true);
       }
-    }, 15 * 60 * 1000); // Cada 15 minutos
+    }, 15 * 60 * 1000);
 
     const subscription = AppState.addEventListener('change', nextAppState => {
       if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
@@ -157,6 +168,16 @@ export default function App() {
     return new Date(y, m, d).getTime();
   };
 
+  const formatShortDateNum = (fechaDia) => {
+    if (!fechaDia) return '';
+    const dMatch = fechaDia.match(/\d+/);
+    const mMatch = fechaDia.match(/[A-Z]+/);
+    if (!dMatch || !mMatch) return fechaDia;
+    const d = dMatch[0].padStart(2, '0');
+    const m = String(aerowebMonths.indexOf(mMatch[0]) + 1).padStart(2, '0');
+    return `${d}/${m}`;
+  };
+
   const formatMinToHM = (totalMinutes) => {
     if (!totalMinutes || totalMinutes <= 0) return '0h 00m';
     const h = Math.floor(totalMinutes / 60);
@@ -174,7 +195,6 @@ export default function App() {
     return t2 - t1;
   };
 
-  // Detecta silenciosamente si el vuelo es de 3 pilotos según las rutas indicadas (USH+FTE, LIM, SSA, etc.)
   const detectarCantidadPilotos = (dayObj) => {
     const pilotosEnLista = (dayObj.tripulacion || []).filter(
       t => (t.rol === 'CP' || t.rol === 'FO') && (!t.duty || t.duty === 'OP')
@@ -241,6 +261,74 @@ export default function App() {
     };
   };
 
+  const checkIfOperacionTouchesNextDay = (dayObj) => {
+    if (!dayObj.tramos || dayObj.tramos.length === 0) return false;
+    const pres = dayObj.presentacion;
+    const presMin = pres && pres.includes(':') ? parseInt(pres.split(':')[0], 10) * 60 + parseInt(pres.split(':')[1], 10) : 0;
+
+    for (const t of dayObj.tramos) {
+      if (t.comienzoRaw && t.finRaw && t.comienzoRaw.includes(':') && t.finRaw.includes(':')) {
+        const [h1, m1] = t.comienzoRaw.split(':').map(Number);
+        const [h2, m2] = t.finRaw.split(':').map(Number);
+        const min1 = h1 * 60 + m1;
+        const min2 = h2 * 60 + m2;
+        if (min2 < min1 || min1 < presMin || (min2 + 30) >= 24 * 60) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  // Normativa CCT AR-877-2021 / ARSA-APLA-402-2000-E para Comida en Escala Internacional
+  const correspondeComidaEscalaInternacional = (dayObj) => {
+    if (dayObj.isSpecialDay || !dayObj.tramos || dayObj.tramos.length === 0) return false;
+
+    let tocaEscalaIntl = false;
+    dayObj.tramos.forEach(t => {
+      const ruta = (t.ruta || '').toUpperCase();
+      DESTINOS_INTERNACIONALES.forEach(code => {
+        if (ruta.includes(code)) tocaEscalaIntl = true;
+      });
+    });
+
+    if (!tocaEscalaIntl) return false;
+
+    if (dayObj.tramos.length === 1) return true;
+
+    const primerTramo = dayObj.tramos[0];
+    const ultimoTramo = dayObj.tramos[dayObj.tramos.length - 1];
+
+    const llegadaEscalaStr = primerTramo.finRaw || '';
+    const salidaEscalaStr = ultimoTramo.comienzoRaw || '';
+    const finJornadaStr = ultimoTramo.finRaw || '';
+
+    const toMin = (s) => {
+      if (!s || !s.includes(':')) return -1;
+      const [h, m] = s.split(':').map(Number);
+      return h * 60 + m;
+    };
+
+    const llegadaMin = toMin(llegadaEscalaStr);
+    const salidaMin = toMin(salidaEscalaStr);
+    let finMin = toMin(finJornadaStr);
+    const inicioMin = toMin(primerTramo.comienzoRaw);
+
+    if (finMin !== -1 && inicioMin !== -1 && finMin < inicioMin) {
+      finMin += 24 * 60;
+    }
+
+    if (llegadaMin >= 19 * 60 + 30 || salidaMin >= 20 * 60 || finMin >= 22 * 60) {
+      return true;
+    }
+
+    if (llegadaMin !== -1 && salidaMin !== -1 && llegadaMin <= 13 * 60 && salidaMin >= 13 * 60 + 30) {
+      return true;
+    }
+
+    return false;
+  };
+
   const calcularTiemposOperativos = (presentacionStr, tramos = []) => {
     if (!tramos || tramos.length === 0) {
       return { tvDisplay: '0h 00m', tsDisplay: '0h 00m' };
@@ -272,14 +360,6 @@ export default function App() {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
   };
 
-  const RestarUnaHora = (horaStr) => {
-    if (!horaStr || !horaStr.includes(':')) return '-';
-    let [h, m] = horaStr.split(':').map(Number);
-    h -= 1;
-    if (h < 0) h += 24;
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-  };
-
   const calcularTurnaround = (llegadaStr, salidaStr) => {
     if (!llegadaStr || !salidaStr || llegadaStr === '-' || salidaStr === '-') return null;
     const diff = diffMinutes(llegadaStr, salidaStr);
@@ -292,16 +372,18 @@ export default function App() {
     const c = code?.toUpperCase() || '';
     if (c === 'D/L' || c === 'OF') return 'Día Libre';
     if (c === 'VAC') return 'Vacaciones';
-    if (c.startsWith('SB') || c === 'SBF') return 'Simulador';
+    if (c.startsWith('SB') || c === 'SIM') return `Simulador (${c})`;
     if (c === '*') return 'Día OFF';
     if (c === 'RPT') return 'Reprogramación (RPT)';
+    if (c === 'GUA') return 'Guardia (GUA)';
+    if (c === 'ELD' || c === 'CUR' || c === 'INS') return `Instrucción (${c})`;
     if (c === 'LIC' || c === 'MED') return 'Licencia / Médico';
     return code;
   };
 
   const isSpecialActivity = (code) => {
     const c = code?.toUpperCase() || '';
-    return ['D/L', 'VAC', '*', 'OF', 'RPT'].includes(c) || c.startsWith('SB') || ['LIC', 'MED', 'SBF'].includes(c);
+    return ['D/L', 'VAC', '*', 'OF', 'RPT', 'GUA', 'ELD', 'CUR', 'INS', 'SIM'].includes(c) || c.startsWith('SB') || ['LIC', 'MED', 'SBF'].includes(c);
   };
 
   const recalculateExistingCards = (cards) => {
@@ -319,12 +401,14 @@ export default function App() {
         const cantPilotos = detectarCantidadPilotos(updated);
         const calc = calcularUltimoAterrizaje(updated.presentacion, updated.tramos?.length || 2, cantPilotos);
         updated.ultimoAterrizaje = calc.display;
-        updated.touchesNextDay = calc.touchesNextDay;
+        updated.touchesNextDay = checkIfOperacionTouchesNextDay(updated);
         updated.cantPilotos = cantPilotos;
 
         const tiempos = calcularTiemposOperativos(updated.presentacion, updated.tramos || []);
         updated.tiempoVuelo = tiempos.tvDisplay;
         updated.tiempoServicio = tiempos.tsDisplay;
+      } else if (updated.isSpecialDay && updated.specialName?.startsWith('Simulador')) {
+        updated.touchesNextDay = checkIfOperacionTouchesNextDay(updated);
       }
       return updated;
     });
@@ -353,7 +437,7 @@ export default function App() {
       const isSpecial = isSpecialActivity(item.actividad);
       let presentacion = item.checkin || '-';
       
-      if (!isSpecial && item.comienzo && (!presentacion || presentacion === '-' || Math.abs(parseInt(item.comienzo) - parseInt(presentacion)) > 2)) {
+      if ((!isSpecial || item.actividad?.startsWith('SB')) && item.comienzo && (!presentacion || presentacion === '-' || Math.abs(parseInt(item.comienzo) - parseInt(presentacion)) > 2)) {
         presentacion = deducirCheckin(item.comienzo);
       }
 
@@ -362,7 +446,7 @@ export default function App() {
           id: dateKey,
           fechaDia: dateKey,
           month: itemMonth,
-          presentacion: isSpecial ? '-' : presentacion,
+          presentacion: (isSpecial && !item.actividad?.startsWith('SB')) ? '-' : presentacion,
           flota: item.tipoAvion || 'B738',
           ultimoAterrizaje: '-',
           tiempoVuelo: '0h 00m',
@@ -387,7 +471,7 @@ export default function App() {
         result.push(daysMap[dateKey]);
       }
 
-      if (daysMap[dateKey].presentacion === '-' && presentacion !== '-' && !isSpecial) {
+      if (daysMap[dateKey].presentacion === '-' && presentacion !== '-' && (!isSpecial || item.actividad?.startsWith('SB'))) {
         daysMap[dateKey].presentacion = presentacion;
       }
 
@@ -395,14 +479,8 @@ export default function App() {
         daysMap[dateKey].flota = item.tipoAvion;
       }
 
-      if (item.pickupTime) daysMap[dateKey].pickupTime = item.pickupTime;
-      if (item.pickupAddress) daysMap[dateKey].pickupAddress = item.pickupAddress;
-      if (item.pickupBase) daysMap[dateKey].pickupBase = item.pickupBase;
-      if (item.pickupStatus) daysMap[dateKey].pickupStatus = item.pickupStatus;
-      if (item.flightStatus) daysMap[dateKey].flightStatus = item.flightStatus;
-
-      if (!isSpecial) {
-        daysMap[dateKey].isSpecialDay = false; 
+      if (!isSpecial || item.actividad?.startsWith('SB')) {
+        if (!isSpecial) daysMap[dateKey].isSpecialDay = false;
         daysMap[dateKey].tramos.push({
           ruta: item.desde && item.hacia ? `${item.desde} → ${item.hacia}` : item.actividad,
           nroVuelo: item.actividad,
@@ -431,18 +509,23 @@ export default function App() {
   const todayMs = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
   const tomorrowMs = todayMs + 86400000;
 
-  const getPickupTargetUrl = (fechaDia) => {
-    const flightMs = getMsFromDateStr(fechaDia);
-    if (flightMs === todayMs) {
-      return URL_PICKUP_HOY;
-    }
-    return URL_PICKUP_MANANA;
-  };
-
   const isAutogestionAvailable = (fechaDia) => {
     if (!fechaDia) return false;
     const flightMs = getMsFromDateStr(fechaDia);
     return flightMs === todayMs || flightMs === tomorrowMs;
+  };
+
+  const isFlightCompletedOrInProgress = (dayObj) => {
+    const dayMs = getMsFromDateStr(dayObj.fechaDia);
+    if (dayMs < todayMs) return true;
+    if (dayMs > todayMs) return false;
+
+    const nowMinutes = today.getHours() * 60 + today.getMinutes();
+    if (dayObj.presentacion && dayObj.presentacion.includes(':')) {
+      const [ph, pm] = dayObj.presentacion.split(':').map(Number);
+      return nowMinutes >= (ph * 60 + pm);
+    }
+    return false;
   };
 
   const handleDataParsed = async (payload) => {
@@ -491,11 +574,19 @@ export default function App() {
           const existingOrigIndex = updatedOrig.findIndex(o => o.fechaDia === day.fechaDia);
           if (existingOrigIndex === -1) {
             updatedOrig.push(day);
-          } else if (
-            (!updatedOrig[existingOrigIndex].tripulacion || updatedOrig[existingOrigIndex].tripulacion.length <= 1) &&
-            day.tripulacion && day.tripulacion.length > 1
-          ) {
-            updatedOrig[existingOrigIndex].tripulacion = day.tripulacion;
+          } else {
+            if (updatedOrig[existingOrigIndex].tripulacion) {
+              updatedOrig[existingOrigIndex].tripulacion = updatedOrig[existingOrigIndex].tripulacion.map(t => ({
+                ...t,
+                nombre: (t.nombre || '').split(/\b(?:MON|TUE|WED|THU|FRI|SAT|SUN)\b|\b\d{1,2}[A-Z]{3}\b/i)[0].trim()
+              }));
+            }
+            if (
+              (!updatedOrig[existingOrigIndex].tripulacion || updatedOrig[existingOrigIndex].tripulacion.length <= 1) &&
+              day.tripulacion && day.tripulacion.length > 1
+            ) {
+              updatedOrig[existingOrigIndex].tripulacion = day.tripulacion;
+            }
           }
         });
         await AsyncStorage.setItem('rosterOriginal', JSON.stringify(updatedOrig));
@@ -504,7 +595,6 @@ export default function App() {
 
       groupedRealizada = compararConOriginal(groupedRealizada, originalCards);
 
-      // Disparar notificación si hubo algún cambio nuevo respecto a la última lectura
       await notificarNuevosCambios(existingMonthCards, groupedRealizada);
 
       const nowTime = new Date();
@@ -537,7 +627,7 @@ export default function App() {
         if (currentChanges.length > 0 && currentSignature !== prevSignature) {
           await Notifications.scheduleNotificationAsync({
             content: {
-              title: `✈️ Modificación en tu vuelo del ${day.fechaDia}`,
+              title: `✈️ Novedad en tu vuelo del ${day.fechaDia}`,
               body: currentChanges.join('\n'),
               sound: true
             },
@@ -552,12 +642,15 @@ export default function App() {
     return currentCards.map(realDay => {
       const origDay = originalCards.find(o => o.fechaDia === realDay.fechaDia && o.month === realDay.month);
       const cambios = [];
+      realDay.isRPT = false;
+      realDay.rptType = null;
 
       if (origDay && !realDay.isSpecialDay) {
         const origRutas = origDay.tramos?.map(t => t.nroVuelo).join(',') || '';
         const realRutas = realDay.tramos?.map(t => t.nroVuelo).join(',') || '';
+        const origEtd = origDay.tramos?.[0]?.comienzoRaw || '-';
+        const realEtd = realDay.tramos?.[0]?.comienzoRaw || '-';
         const origHorario = origDay.tramos?.[0]?.horario || '-';
-        const realHorario = realDay.tramos?.[0]?.horario || '-';
 
         if (origRutas !== realRutas && realRutas !== '') {
           realDay.isRPT = true;
@@ -565,12 +658,12 @@ export default function App() {
           realDay.originalHorario = origHorario;
           realDay.originalPresentacion = origDay.presentacion;
           cambios.push(`🔄 Cambio de vuelo: Orig ${origRutas} (${origHorario})`);
-        } else if (origHorario !== realHorario) {
+        } else if (origEtd !== realEtd && origEtd !== '-' && realEtd !== '-') {
           realDay.isRPT = true;
           realDay.rptType = 'DELAY';
           realDay.originalHorario = origHorario;
           realDay.originalPresentacion = origDay.presentacion;
-          cambios.push(`⚠️ Horario modificado: Orig Presentación ${origDay.presentacion} | Vuelo ${origHorario}`);
+          cambios.push(`⚠️ Salida modificada: ETD Orig ${origEtd} → Nuevo ${realEtd}`);
         }
 
         if (origDay.flota && realDay.flota && origDay.flota !== realDay.flota) {
@@ -594,36 +687,58 @@ export default function App() {
     });
   };
 
-  // Script inyectado en el WebView dentro de "Pick up, detalle del vuelo Aeroweb"
+  const isSelectedTomorrow = getMsFromDateStr(selectedFlight.fechaDia) === tomorrowMs;
   const pickupInjectedJS = `
     (function() {
       function parseAutogestionPage() {
         try {
+          var url = window.location.href.toLowerCase();
           var pass = document.querySelector('input[type="password"]');
           var inputs = document.querySelectorAll('input');
           var user = null;
           for (var i = 0; i < inputs.length; i++) {
             var t = (inputs[i].getAttribute('type') || '').toLowerCase();
-            if ((t === 'text' || t === '') && inputs[i].type !== 'hidden') {
+            if ((t === 'text' || t === '' || t === 'number') && inputs[i].type !== 'hidden') {
               user = inputs[i]; break;
             }
           }
+
           if (user && pass && !window._pickupLoginDone) {
             window._pickupLoginDone = true;
             user.value = "${userProfileState?.aerowebUser || ''}";
+            user.dispatchEvent(new Event('input', { bubbles: true }));
             user.dispatchEvent(new Event('change', { bubbles: true }));
             pass.value = "${userProfileState?.dni || userProfileState?.aerowebPass || ''}";
+            pass.dispatchEvent(new Event('input', { bubbles: true }));
             pass.dispatchEvent(new Event('change', { bubbles: true }));
             setTimeout(function() {
               var btn = document.querySelector('input[type="submit"], button[type="submit"], button');
               if (btn) btn.click();
-            }, 400);
+            }, 450);
             return;
           }
 
-          var bodyTxt = document.body ? (document.body.textContent || document.body.innerText) : '';
-          if (bodyTxt.length > 120 && !pass) {
-            // 1. Extraer todos los tripulantes (usando textContent para leer las 5 filas aunque el acordeón esté cerrado)
+          if (!pass && ${isSelectedTomorrow ? 'true' : 'false'} && !url.includes('mananapost') && !window._redirectedManana) {
+            window._redirectedManana = true;
+            window.location.href = "${URL_PICKUP_MANANA}";
+            return;
+          }
+
+          var bodyTxt = document.body ? (document.body.innerText || document.body.textContent) : '';
+          if (bodyTxt.length > 100 && !pass) {
+            if (!window._accordionsClicked) {
+              window._accordionsClicked = true;
+              var clickables = document.querySelectorAll('a, button, div[data-toggle="collapse"], .panel-heading a');
+              clickables.forEach(function(el) {
+                var txt = (el.innerText || el.textContent || '').toLowerCase();
+                if (txt.includes('búsqueda') || txt.includes('busqueda') || txt.includes('estado del vuelo') || txt.includes('tripulaci')) {
+                  try { el.click(); } catch(err) {}
+                }
+              });
+            }
+
+            var fullDomText = (document.body.textContent || '').replace(/\\s+/g, ' ');
+
             var extractedCrew = [];
             var rows = document.querySelectorAll('table tr');
             rows.forEach(function(row) {
@@ -640,49 +755,45 @@ export default function App() {
               }
             });
 
-            // 2. Extraer Horario de búsqueda programado (ej: 05:10), Domicilio, Base y Estado
-            var pkMatch = bodyTxt.match(/Horario\\s*de\\s*b[uú]squeda(?:\\s*programado)?\\s*:\\s*(\\d{2}:\\d{2})/i)
-                       || bodyTxt.match(/(?:Pick\\s*Up|Remis)\\s*:\\s*(\\d{2}:\\d{2})/i);
-            var dirMatch = bodyTxt.match(/Domicilio\\s*:\\s*([^\\n\\r]+?)(?=\\s*Base:|\\s*Hora|$)/i);
-            var baseMatch = bodyTxt.match(/Base\\s*:\\s*([^\\n\\r]+?)(?=\\s*Estado|\\s*El viaje|$)/i);
-            var statusMovilMatch = bodyTxt.match(/(VIAJE\\s+VALIDADO[^\\n\\r]*|VEH[IÍ]CULO\\s+ASIGNADO[^\\n\\r]*)/i);
+            var pkMatch = fullDomText.match(/Horario\\s*de\\s*b[uú]squeda\\s*programado\\s*:\\s*(\\d{2}:\\d{2})/i)
+                       || fullDomText.match(/Hora\\s*de\\s*b[uú]squeda\\s*:\\s*(\\d{2}:\\d{2})/i);
+            var dirMatch = fullDomText.match(/Domicilio\\s*:\\s*(.+?)(?=\\s*Base\\s*:|\\s*Hora\\s*de\\s*presentaci|$)/i);
+            var baseMatch = fullDomText.match(/Base\\s*:\\s*([A-Za-zÁÉÍÓÚÑáéíóúñ\\s]+?)(?=\\s*Estado|\\s*El viaje|\\s*Vuelo|$)/i);
+            var statusMovilMatch = fullDomText.match(/(VIAJE\\s+VALIDADO[^.\\n]*|VEH[IÍ]CULO\\s+ASIGNADO[^.\\n]*|SIN\\s+SOLICITUD[^.\\n]*)/i);
 
-            // 3. Extraer Estado del vuelo (Equipo: 73W y clases W / Y)
-            var eqMatch = bodyTxt.match(/Estado\\s*del\\s*vuelo\\s*:\\s*(\\d+)\\s*-\\s*Equipo\\s*:\\s*([A-Z0-9]+)/i);
+            var eqMatch = fullDomText.match(/Estado\\s*del\\s*vuelo\\s*:\\s*([A-Z0-9]+)\\s*-\\s*Equipo\\s*:\\s*([A-Z0-9]+)/i);
             var cabinClasses = [];
             rows.forEach(function(r) {
               var cTds = r.querySelectorAll('td');
-              if (cTds.length === 5) {
+              if (cTds.length >= 5) {
                 var orig = (cTds[0].textContent || '').trim();
                 var clase = (cTds[1].textContent || '').trim();
                 var cap = (cTds[2].textContent || '').trim();
                 var booked = (cTds[3].textContent || '').trim();
                 var disp = (cTds[4].textContent || '').trim();
-                if ((clase === 'W' || clase === 'Y' || clase === 'C') && !isNaN(parseInt(cap))) {
+                if ((clase === 'W' || clase === 'Y' || clase === 'C' || clase === 'J') && !isNaN(parseInt(cap))) {
                   cabinClasses.push({ origen: orig, clase: clase, capacidad: cap, booked: booked, disponibles: disp });
                 }
               }
             });
 
-            if (extractedCrew.length > 0 || pkMatch || dirMatch || cabinClasses.length > 0) {
-              window.ReactNativeWebView.postMessage(JSON.stringify({
-                type: 'autogestion_extracted',
-                pickupTime: pkMatch ? pkMatch[1] : null,
-                pickupAddress: dirMatch ? dirMatch[1].trim() : null,
-                pickupBase: baseMatch ? baseMatch[1].trim() : null,
-                pickupStatus: statusMovilMatch ? statusMovilMatch[1].trim() : null,
-                flightStatus: (eqMatch || cabinClasses.length > 0) ? {
-                  vuelo: eqMatch ? eqMatch[1] : '',
-                  equipo: eqMatch ? eqMatch[2] : '',
-                  clases: cabinClasses
-                } : null,
-                crew: extractedCrew
-              }));
-            }
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'autogestion_extracted',
+              pickupTime: pkMatch ? pkMatch[1] : null,
+              pickupAddress: dirMatch ? dirMatch[1].trim() : null,
+              pickupBase: baseMatch ? baseMatch[1].trim() : null,
+              pickupStatus: statusMovilMatch ? statusMovilMatch[1].trim() : null,
+              flightStatus: (eqMatch || cabinClasses.length > 0) ? {
+                vuelo: eqMatch ? eqMatch[1] : '',
+                equipo: eqMatch ? eqMatch[2] : '',
+                clases: cabinClasses
+              } : null,
+              crew: extractedCrew
+            }));
           }
         } catch(e) {}
       }
-      setInterval(parseAutogestionPage, 1400);
+      setInterval(parseAutogestionPage, 1200);
     })();
     true;
   `;
@@ -691,6 +802,7 @@ export default function App() {
     try {
       const data = JSON.parse(event.nativeEvent.data);
       if (data.type === 'autogestion_extracted') {
+        setRemisLoading(false);
         let formattedCrew = selectedFlight.tripulacion || [];
 
         if (data.crew && data.crew.length > 0) {
@@ -699,7 +811,7 @@ export default function App() {
             duty: trip.duty,
             nombre: trip.nombre,
             rangType: trip.rol === 'CP' ? '4_gold' : (trip.rol === 'FO' ? '3_gold' : (trip.rol === 'CM' ? '2_silver' : 'dots')),
-            label: trip.rol === 'CP' ? 'Comandante' : (trip.rol === 'FO' ? 'Primer Oficial' : (trip.rol === 'CM' ? 'Comisario' : 'Tripulante de Cabina'))
+            label: trip.rol === 'CP' ? 'Comandante' : (trip.rol === 'FO' ? 'Primer Oficial' : (trip.rol === 'CM' ? 'Comisario' : 'Tripulante'))
           }));
         }
 
@@ -735,58 +847,78 @@ export default function App() {
     } catch (e) {}
   };
 
-  const rosterMonthMatch = rosterData.length > 0 ? rosterData[0].fechaDia.match(/[A-Z]+/) : null;
-  const rosterMonthIndex = rosterMonthMatch ? aerowebMonths.indexOf(rosterMonthMatch[0]) : today.getMonth();
+  // =========================================================================
+  // CÁLCULO DE VIÁTICOS Y TÍTULO DE MES ("noviembre 2026" / "a cobrar en enero")
+  // =========================================================================
+  const rosterMonthIndex = selectedViaticosMonth;
   const cobroMonthIndex = (rosterMonthIndex + 2) % 12;
-  let cobroYear = today.getFullYear();
-  if (rosterMonthIndex >= 10) cobroYear += 1;
   const tituloMes = `${mesesEspanol[rosterMonthIndex]} ${today.getFullYear()}`;
-  const subtituloCobro = `a cobrar en ${mesesEspanol[cobroMonthIndex]} ${cobroYear}`;
+  const subtituloCobro = `a cobrar en ${mesesEspanol[cobroMonthIndex]}`;
 
-  let diasServicioFlight = 0;
-  let diasServicioSimulador = 0;
-  let diasExtraPorCruce = 0;
-  let totalReprogramacionesCCT = 0;
-  
-  const diasOcupados = new Set(rosterData.map(d => d.fechaDia));
+  const rankMultiplier = esComandante ? 1.3 : 1.0; 
+  const viaticoSinComidaValor = Math.round(87564 * rankMultiplier);
+  const viaticoTierraValor = Math.round(77932 * rankMultiplier);
+  const viaticoInternacionalUSD = 36;
 
-  rosterData.forEach(d => {
+  const targetAerowebMonth = aerowebMonths[rosterMonthIndex];
+  const actividadesDelMes = rosterData.filter(d => !d.month || d.month === targetAerowebMonth);
+  const actividadesComputables = actividadesDelMes.filter(d =>
+    mostrarSoloRealizados ? isFlightCompletedOrInProgress(d) : true
+  );
+
+  const itemsVueloSinComida = [];
+  const itemsVueloConComida = [];
+  const itemsTierraSimu = [];
+  const itemsComidaInternacional = [];
+  const itemsDiasServicio = [];
+
+  const fechasContabilizadas = new Set(actividadesComputables.map(d => d.fechaDia));
+
+  actividadesComputables.forEach(d => {
+    const fechaCorta = formatShortDateNum(d.fechaDia);
+    const labelVuelos = (d.tramos || []).map(t => t.nroVuelo).join(' · ') || d.specialName || 'Actividad';
+
     if (!d.isSpecialDay) {
-      diasServicioFlight++;
-      if (d.isRPT) totalReprogramacionesCCT++;
+      const tieneComidaIntl = correspondeComidaEscalaInternacional(d);
+      itemsDiasServicio.push({ fecha: fechaCorta, detalle: labelVuelos });
+
+      if (tieneComidaIntl) {
+        itemsVueloConComida.push({ fecha: fechaCorta, detalle: labelVuelos, monto: viaticoSinComidaValor });
+        itemsComidaInternacional.push({ fecha: fechaCorta, detalle: labelVuelos, montoUSD: viaticoInternacionalUSD });
+      } else {
+        itemsVueloSinComida.push({ fecha: fechaCorta, detalle: labelVuelos, monto: viaticoSinComidaValor });
+      }
+
       if (d.touchesNextDay) {
-        const currentMs = getMsFromDateStr(d.fechaDia);
-        const nextDayMs = currentMs + 86400000;
-        const nextDate = new Date(nextDayMs);
-        const nextDayStr = `${String(nextDate.getDate()).padStart(2, '0')}${aerowebMonths[nextDate.getMonth()]}`;
-        
-        if (!diasOcupados.has(nextDayStr)) {
-          diasExtraPorCruce++;
+        const nextDate = new Date(getMsFromDateStr(d.fechaDia) + 86400000);
+        const nextKey = `${String(nextDate.getDate()).padStart(2, '0')}${aerowebMonths[nextDate.getMonth()]}`;
+        const nextShort = `${String(nextDate.getDate()).padStart(2, '0')}/${String(nextDate.getMonth() + 1).padStart(2, '0')}`;
+        if (!fechasContabilizadas.has(nextKey)) {
+          itemsDiasServicio.push({ fecha: nextShort, detalle: `${labelVuelos} (+1)` });
+          itemsVueloSinComida.push({ fecha: nextShort, detalle: `${labelVuelos} (+1)`, monto: viaticoSinComidaValor });
         }
       }
-    } else if (d.specialName === 'Simulador') {
-      diasServicioSimulador++;
+    } else if (d.specialName && (d.specialName.startsWith('Simulador') || d.specialName.startsWith('Guardia') || d.specialName.startsWith('Instrucción'))) {
+      itemsDiasServicio.push({ fecha: fechaCorta, detalle: d.specialName });
+      itemsTierraSimu.push({ fecha: fechaCorta, detalle: d.specialName, monto: viaticoTierraValor });
+
+      if (d.touchesNextDay) {
+        const nextDate = new Date(getMsFromDateStr(d.fechaDia) + 86400000);
+        const nextKey = `${String(nextDate.getDate()).padStart(2, '0')}${aerowebMonths[nextDate.getMonth()]}`;
+        const nextShort = `${String(nextDate.getDate()).padStart(2, '0')}/${String(nextDate.getMonth() + 1).padStart(2, '0')}`;
+        if (!fechasContabilizadas.has(nextKey)) {
+          itemsDiasServicio.push({ fecha: nextShort, detalle: `${d.specialName} (+1)` });
+          itemsTierraSimu.push({ fecha: nextShort, detalle: `${d.specialName} (+1)`, monto: viaticoTierraValor });
+        }
+      }
     }
   });
 
-  const totalDiasFlight = diasServicioFlight + diasExtraPorCruce;
-  const rankMultiplier = esComandante ? 1.3 : 1.0; 
-
-  const viaticoNacionalValor = 87564 * rankMultiplier; 
-  const viaticoTierraValor = 77932 * rankMultiplier; 
-  const viaticoInternacionalValor = 36; 
-  
-  const vuelosInternacionales = rosterData.reduce((acc, curr) => {
-    let count = 0;
-    curr.tramos?.forEach(t => {
-      const rutaStr = t?.ruta || '';
-      if (rutaStr.includes('GIG') || rutaStr.includes('SCL') || rutaStr.includes('GRU') || rutaStr.includes('MVD') || rutaStr.includes('ASU')) count++;
-    });
-    return acc + count;
-  }, 0);
-  
-  const pesosTotales = (totalDiasFlight * viaticoNacionalValor) + (diasServicioSimulador * viaticoTierraValor);
-  const dolaresTotales = vuelosInternacionales * viaticoInternacionalValor;
+  const totalPesosVueloSinComida = itemsVueloSinComida.length * viaticoSinComidaValor;
+  const totalPesosVueloConComida = itemsVueloConComida.length * viaticoSinComidaValor;
+  const totalPesosTierra = itemsTierraSimu.length * viaticoTierraValor;
+  const pesosTotales = totalPesosVueloSinComida + totalPesosVueloConComida + totalPesosTierra;
+  const dolaresTotales = itemsComidaInternacional.length * viaticoInternacionalUSD;
 
   const todayActivity = rosterData.find(d => getMsFromDateStr(d.fechaDia) === todayMs);
   const rosterOrdenado = [...rosterData].sort((a, b) => getMsFromDateStr(a.fechaDia) - getMsFromDateStr(b.fechaDia));
@@ -806,7 +938,7 @@ export default function App() {
     let colorBg = '#F1F5F9';
     let colorText = '#475569';
     if (item.specialName === 'Vacaciones') { icon = '☀️'; colorBg = '#FEF3C7'; colorText = '#D97706'; }
-    else if (item.specialName === 'Simulador') { icon = '🖥️'; colorBg = '#EDE9FE'; colorText = '#7C3AED'; }
+    else if (item.specialName?.startsWith('Simulador')) { icon = '🖥️'; colorBg = '#EDE9FE'; colorText = '#7C3AED'; }
     else if (item.specialName === 'Día Libre' || item.specialName === 'Día OFF') { icon = '🏠'; colorBg = '#E0F2FE'; colorText = '#0284C7'; }
     else if (item.specialName === 'Reprogramación (RPT)') { icon = '🔄'; colorBg = '#FFEDD5'; colorText = '#EA580C'; }
 
@@ -874,7 +1006,7 @@ export default function App() {
               fontWeight: 'bold' 
             }}>
               {item.rptType === 'DELAY'
-                ? `⚠️ DEMORADO (Orig: ${item.originalHorario})`
+                ? `⚠️ ${item.cambiosDetectados[0]}`
                 : (item.rptType === 'ROUTE' ? '🔄 REPROGRAMADO' : `🔔 ${item.cambiosDetectados[0]}`)}
             </Text>
           </View>
@@ -900,18 +1032,25 @@ export default function App() {
     let icon = '🏠';
     let colorLine = '#10B981';
     if (item.specialName === 'Vacaciones') { icon = '☀️'; colorLine = '#F59E0B'; }
-    else if (item.specialName === 'Simulador') { icon = '🖥️'; colorLine = '#8B5CF6'; }
+    else if (item.specialName?.startsWith('Simulador')) { icon = '🖥️'; colorLine = '#8B5CF6'; }
     else if (item.specialName === 'Día OFF' || item.specialName === 'Día Libre') { icon = '🏠'; colorLine = '#64748B'; }
     else if (item.specialName === 'Reprogramación (RPT)') { icon = '🔄'; colorLine = '#EA580C'; }
     
     const isPast = isPastActivity(item.fechaDia);
+    const simHorario = item.tramos?.[0]?.horario;
 
     return (
       <View key={item.id || index} style={[styles.actividadSpecialCard, { borderLeftColor: colorLine, opacity: isPast ? 0.5 : 1 }]}>
         <View style={styles.actividadSpecialCardContent}>
           <Text style={styles.actividadSpecialCardDate}>{item.fechaDia}</Text>
-          <Text style={styles.actividadSpecialCardTitle}>{item.specialName}</Text>
-          <View style={{ flex: 1 }} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.actividadSpecialCardTitle}>{item.specialName}</Text>
+            {simHorario && (
+              <Text style={{ fontSize: 12, color: COLORS.primary, fontWeight: '600', marginTop: 2 }}>
+                Pres: {item.presentacion} • Sesión: {simHorario}
+              </Text>
+            )}
+          </View>
           <Text style={styles.actividadSpecialCardIcon}>{icon}</Text>
         </View>
       </View>
@@ -946,7 +1085,6 @@ export default function App() {
         </View>
       </View>
 
-      {/* Sincronizador silencioso en segundo plano cada 15 minutos */}
       {silentSyncRunning && !syncModalVisible && !modalVisible && (
         <AerowebSyncScreen
           silentMode={true}
@@ -1021,39 +1159,245 @@ export default function App() {
             </View>
 
             <View style={styles.monthSelectorLight}>
-              <TouchableOpacity style={styles.monthBtnLight}><Text style={styles.monthBtnTextLight}>{'<'}</Text></TouchableOpacity>
+              <TouchableOpacity
+                style={styles.monthBtnLight}
+                onPress={() => setSelectedViaticosMonth(prev => (prev === 0 ? 11 : prev - 1))}
+              >
+                <Text style={styles.monthBtnTextLight}>{'<'}</Text>
+              </TouchableOpacity>
               <View style={{ alignItems: 'center' }}>
                 <Text style={styles.monthTitleLight}>{tituloMes}</Text>
                 <Text style={styles.monthSubtitleLight}>{subtituloCobro}</Text>
               </View>
-              <TouchableOpacity style={styles.monthBtnLight}><Text style={styles.monthBtnTextLight}>{'>'}</Text></TouchableOpacity>
+              <TouchableOpacity
+                style={styles.monthBtnLight}
+                onPress={() => setSelectedViaticosMonth(prev => (prev === 11 ? 0 : prev + 1))}
+              >
+                <Text style={styles.monthBtnTextLight}>{'>'}</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={{ flexDirection: 'row', justifyContent: 'center', marginBottom: 14 }}>
+              <TouchableOpacity
+                onPress={() => setMostrarSoloRealizados(!mostrarSoloRealizados)}
+                style={{ backgroundColor: '#E0F2FE', paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20 }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: 'bold', color: COLORS.primary }}>
+                  {mostrarSoloRealizados
+                    ? '✓ Mostrando vuelos realizados a la fecha (Ver proyectado)'
+                    : '📅 Mostrando proyectado de todo el mes (Ver solo realizados)'}
+                </Text>
+              </TouchableOpacity>
             </View>
 
             {viaticosView === 'cantidades' ? (
               <View style={styles.listCard}>
-                <View style={styles.rowItem}><Text style={styles.itemLabel}>Días de vuelo (+ cruces de día)</Text><View style={styles.rowItemRight}><Text style={styles.itemVal}>{totalDiasFlight}</Text><Text style={styles.chevron}>›</Text></View></View>
-                <View style={styles.rowItem}><Text style={styles.itemLabel}>Días de Tierra (Simulador/Inst.)</Text><View style={styles.rowItemRight}><Text style={styles.itemVal}>{diasServicioSimulador}</Text><Text style={styles.chevron}>›</Text></View></View>
-                <View style={styles.rowItem}><Text style={styles.itemLabel}>Comidas en escala internacional</Text><View style={styles.rowItemRight}><Text style={styles.itemVal}>{vuelosInternacionales}</Text><Text style={styles.chevron}>›</Text></View></View>
-                <View style={[styles.rowItem, { borderBottomWidth: 0 }]}><Text style={styles.itemLabel}>Reprogramaciones CCT</Text><View style={styles.rowItemRight}><Text style={styles.itemVal}>{totalReprogramacionesCCT}</Text><Text style={styles.chevron}>›</Text></View></View>
+                <TouchableOpacity
+                  style={styles.rowItem}
+                  onPress={() => setExpandedViaticos(p => ({ ...p, diasServicio: !p.diasServicio }))}
+                >
+                  <Text style={styles.itemLabel}>Días de servicio</Text>
+                  <View style={styles.rowItemRight}>
+                    <Text style={styles.itemVal}>{itemsDiasServicio.length}</Text>
+                    <Text style={styles.chevron}>{expandedViaticos.diasServicio ? '⌄' : '›'}</Text>
+                  </View>
+                </TouchableOpacity>
+                {expandedViaticos.diasServicio && itemsDiasServicio.map((it, idx) => (
+                  <View key={idx} style={styles.subRowViatico}>
+                    <Text style={styles.subRowDate}>{it.fecha}</Text>
+                    <Text style={styles.subRowFlights}>{it.detalle}</Text>
+                    <Text style={styles.subRowChevron}>›</Text>
+                  </View>
+                ))}
+
+                {itemsVueloSinComida.length > 0 && (
+                  <>
+                    <TouchableOpacity
+                      style={[styles.rowItem, itemsVueloConComida.length === 0 && itemsTierraSimu.length === 0 && !expandedViaticos.vueloSinComida && { borderBottomWidth: 0 }]}
+                      onPress={() => setExpandedViaticos(p => ({ ...p, vueloSinComida: !p.vueloSinComida }))}
+                    >
+                      <Text style={styles.itemLabel}>Viático de vuelo sin comida</Text>
+                      <View style={styles.rowItemRight}>
+                        <Text style={styles.itemVal}>{itemsVueloSinComida.length}</Text>
+                        <Text style={styles.chevron}>{expandedViaticos.vueloSinComida ? '⌄' : '›'}</Text>
+                      </View>
+                    </TouchableOpacity>
+                    {expandedViaticos.vueloSinComida && itemsVueloSinComida.map((it, idx) => (
+                      <View key={idx} style={styles.subRowViatico}>
+                        <Text style={styles.subRowDate}>{it.fecha}</Text>
+                        <Text style={styles.subRowFlights}>{it.detalle}</Text>
+                        <Text style={styles.subRowChevron}>›</Text>
+                      </View>
+                    ))}
+                  </>
+                )}
+
+                {itemsVueloConComida.length > 0 && (
+                  <>
+                    <TouchableOpacity
+                      style={styles.rowItem}
+                      onPress={() => setExpandedViaticos(p => ({ ...p, vueloConComida: !p.vueloConComida }))}
+                    >
+                      <Text style={styles.itemLabel}>Viático de vuelo con comida (Escala Intl.)</Text>
+                      <View style={styles.rowItemRight}>
+                        <Text style={styles.itemVal}>{itemsVueloConComida.length}</Text>
+                        <Text style={styles.chevron}>{expandedViaticos.vueloConComida ? '⌄' : '›'}</Text>
+                      </View>
+                    </TouchableOpacity>
+                    {expandedViaticos.vueloConComida && itemsVueloConComida.map((it, idx) => (
+                      <View key={idx} style={styles.subRowViatico}>
+                        <Text style={styles.subRowDate}>{it.fecha}</Text>
+                        <Text style={styles.subRowFlights}>{it.detalle}</Text>
+                        <Text style={styles.subRowChevron}>›</Text>
+                      </View>
+                    ))}
+                  </>
+                )}
+
+                {itemsTierraSimu.length > 0 && (
+                  <>
+                    <TouchableOpacity
+                      style={[styles.rowItem, { borderBottomWidth: 0 }]}
+                      onPress={() => setExpandedViaticos(p => ({ ...p, tierraSimu: !p.tierraSimu }))}
+                    >
+                      <Text style={styles.itemLabel}>Viático de Tierra (Simulador/Inst.)</Text>
+                      <View style={styles.rowItemRight}>
+                        <Text style={styles.itemVal}>{itemsTierraSimu.length}</Text>
+                        <Text style={styles.chevron}>{expandedViaticos.tierraSimu ? '⌄' : '›'}</Text>
+                      </View>
+                    </TouchableOpacity>
+                    {expandedViaticos.tierraSimu && itemsTierraSimu.map((it, idx) => (
+                      <View key={idx} style={styles.subRowViatico}>
+                        <Text style={styles.subRowDate}>{it.fecha}</Text>
+                        <Text style={styles.subRowFlights}>{it.detalle}</Text>
+                        <Text style={styles.subRowChevron}>›</Text>
+                      </View>
+                    ))}
+                  </>
+                )}
               </View>
             ) : (
               <View>
                 <Text style={styles.sectionHeaderLight}>EN PESOS</Text>
                 <View style={styles.listCard}>
-                  <View style={styles.rowItem}><Text style={styles.itemLabel}>Viático de vuelo (${viaticoNacionalValor.toLocaleString('es-AR')} x {totalDiasFlight})</Text><View style={styles.rowItemRight}><Text style={styles.itemVal}>$ {(totalDiasFlight * viaticoNacionalValor).toLocaleString('es-AR')}</Text><Text style={styles.chevron}>›</Text></View></View>
-                  <View style={styles.rowItem}><Text style={styles.itemLabel}>Viático Tierra (${viaticoTierraValor.toLocaleString('es-AR')} x {diasServicioSimulador})</Text><View style={styles.rowItemRight}><Text style={styles.itemVal}>$ {(diasServicioSimulador * viaticoTierraValor).toLocaleString('es-AR')}</Text><Text style={styles.chevron}>›</Text></View></View>
-                  <View style={[styles.rowItem, { borderBottomWidth: 0 }]}><Text style={[styles.itemLabel, { fontWeight: 'bold' }]}>Total</Text><View style={styles.rowItemRight}><Text style={[styles.itemVal, { fontWeight: 'bold', color: COLORS.primary }]}>$ {pesosTotales.toLocaleString('es-AR')}</Text></View></View>
+                  {itemsVueloSinComida.length > 0 && (
+                    <>
+                      <TouchableOpacity
+                        style={styles.rowItem}
+                        onPress={() => setExpandedViaticos(p => ({ ...p, vueloSinComida: !p.vueloSinComida }))}
+                      >
+                        <Text style={styles.itemLabel}>Viático de vuelo sin comida</Text>
+                        <View style={styles.rowItemRight}>
+                          <Text style={styles.itemVal}>$ {totalPesosVueloSinComida.toLocaleString('es-AR')}</Text>
+                          <Text style={styles.chevron}>{expandedViaticos.vueloSinComida ? '⌄' : '›'}</Text>
+                        </View>
+                      </TouchableOpacity>
+                      {expandedViaticos.vueloSinComida && itemsVueloSinComida.map((it, idx) => (
+                        <View key={idx} style={styles.subRowViatico}>
+                          <Text style={styles.subRowDate}>{it.fecha}</Text>
+                          <Text style={styles.subRowFlights}>{it.detalle}</Text>
+                          <Text style={styles.subRowAmount}>$ {it.monto.toLocaleString('es-AR')}</Text>
+                          <Text style={styles.subRowChevron}>›</Text>
+                        </View>
+                      ))}
+                    </>
+                  )}
+
+                  {itemsVueloConComida.length > 0 && (
+                    <>
+                      <TouchableOpacity
+                        style={styles.rowItem}
+                        onPress={() => setExpandedViaticos(p => ({ ...p, vueloConComida: !p.vueloConComida }))}
+                      >
+                        <Text style={styles.itemLabel}>Viático de vuelo con comida</Text>
+                        <View style={styles.rowItemRight}>
+                          <Text style={styles.itemVal}>$ {totalPesosVueloConComida.toLocaleString('es-AR')}</Text>
+                          <Text style={styles.chevron}>{expandedViaticos.vueloConComida ? '⌄' : '›'}</Text>
+                        </View>
+                      </TouchableOpacity>
+                      {expandedViaticos.vueloConComida && itemsVueloConComida.map((it, idx) => (
+                        <View key={idx} style={styles.subRowViatico}>
+                          <Text style={styles.subRowDate}>{it.fecha}</Text>
+                          <Text style={styles.subRowFlights}>{it.detalle}</Text>
+                          <Text style={styles.subRowAmount}>$ {it.monto.toLocaleString('es-AR')}</Text>
+                          <Text style={styles.subRowChevron}>›</Text>
+                        </View>
+                      ))}
+                    </>
+                  )}
+
+                  {itemsTierraSimu.length > 0 && (
+                    <>
+                      <TouchableOpacity
+                        style={styles.rowItem}
+                        onPress={() => setExpandedViaticos(p => ({ ...p, tierraSimu: !p.tierraSimu }))}
+                      >
+                        <Text style={styles.itemLabel}>Viático Tierra (Simulador)</Text>
+                        <View style={styles.rowItemRight}>
+                          <Text style={styles.itemVal}>$ {totalPesosTierra.toLocaleString('es-AR')}</Text>
+                          <Text style={styles.chevron}>{expandedViaticos.tierraSimu ? '⌄' : '›'}</Text>
+                        </View>
+                      </TouchableOpacity>
+                      {expandedViaticos.tierraSimu && itemsTierraSimu.map((it, idx) => (
+                        <View key={idx} style={styles.subRowViatico}>
+                          <Text style={styles.subRowDate}>{it.fecha}</Text>
+                          <Text style={styles.subRowFlights}>{it.detalle}</Text>
+                          <Text style={styles.subRowAmount}>$ {it.monto.toLocaleString('es-AR')}</Text>
+                          <Text style={styles.subRowChevron}>›</Text>
+                        </View>
+                      ))}
+                    </>
+                  )}
+
+                  <View style={[styles.rowItem, { borderBottomWidth: 0 }]}>
+                    <Text style={[styles.itemLabel, { fontWeight: 'bold' }]}>Total</Text>
+                    <View style={styles.rowItemRight}>
+                      <Text style={[styles.itemVal, { fontWeight: 'bold', color: COLORS.primary }]}>
+                        $ {pesosTotales.toLocaleString('es-AR')}
+                      </Text>
+                    </View>
+                  </View>
                 </View>
                 
-                <Text style={styles.sectionHeaderLight}>COMIDAS EN ESCALA</Text>
-                <View style={styles.listCard}>
-                  <View style={styles.rowItem}><Text style={styles.itemLabel}>Comidas internacional (USD 36 x {vuelosInternacionales})</Text><View style={styles.rowItemRight}><Text style={styles.itemVal}>US$ {dolaresTotales}</Text><Text style={styles.chevron}>›</Text></View></View>
-                  <View style={[styles.rowItem, { borderBottomWidth: 0 }]}><Text style={[styles.itemLabel, { fontWeight: 'bold' }]}>Total</Text><View style={styles.rowItemRight}><Text style={[styles.itemVal, { fontWeight: 'bold', color: COLORS.primary }]}>US$ {dolaresTotales}</Text></View></View>
-                </View>
+                {itemsComidaInternacional.length > 0 && (
+                  <>
+                    <Text style={styles.sectionHeaderLight}>EN DÓLARES (COMIDA EN ESCALA)</Text>
+                    <View style={styles.listCard}>
+                      <TouchableOpacity
+                        style={styles.rowItem}
+                        onPress={() => setExpandedViaticos(p => ({ ...p, comidaInternacional: !p.comidaInternacional }))}
+                      >
+                        <Text style={styles.itemLabel}>Comidas en escala internacional</Text>
+                        <View style={styles.rowItemRight}>
+                          <Text style={styles.itemVal}>US$ {dolaresTotales}</Text>
+                          <Text style={styles.chevron}>{expandedViaticos.comidaInternacional ? '⌄' : '›'}</Text>
+                        </View>
+                      </TouchableOpacity>
+                      {expandedViaticos.comidaInternacional && itemsComidaInternacional.map((it, idx) => (
+                        <View key={idx} style={styles.subRowViatico}>
+                          <Text style={styles.subRowDate}>{it.fecha}</Text>
+                          <Text style={styles.subRowFlights}>{it.detalle}</Text>
+                          <Text style={styles.subRowAmount}>US$ {it.montoUSD}</Text>
+                          <Text style={styles.subRowChevron}>›</Text>
+                        </View>
+                      ))}
+                      <View style={[styles.rowItem, { borderBottomWidth: 0 }]}>
+                        <Text style={[styles.itemLabel, { fontWeight: 'bold' }]}>Total</Text>
+                        <View style={styles.rowItemRight}>
+                          <Text style={[styles.itemVal, { fontWeight: 'bold', color: COLORS.primary }]}>
+                            US$ {dolaresTotales}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                  </>
+                )}
               </View>
             )}
             
-            <Text style={styles.footerTextLight}>Calculado con la normativa AR-877-2021 v1.2.0 • ARSA-APLA-402-2000-E v1.2.0 • B737</Text>
+            <Text style={styles.footerTextLight}>
+              Calculado con la normativa AR-877-2021 v1.2.0 • ARSA-APLA-402-2000-E v1.2.0 • B737 • valores de octubre 2026
+            </Text>
           </View>
         )}
       </ScrollView>
@@ -1076,7 +1420,6 @@ export default function App() {
         />
       </Modal>
 
-      {/* MODAL ÚNICO CON DETALLE DE JORNADA Y VISTA "PICK UP, DETALLE DEL VUELO AEROWEB" INTEGRADA */}
       <Modal visible={modalVisible} animationType="slide" transparent={false}>
         <SafeAreaView style={styles.modalContainer}>
           {modalViewMode === 'detail' ? (
@@ -1175,7 +1518,6 @@ export default function App() {
                   </TouchableOpacity>
                 </View>
 
-                {/* LÍMITES Y SEGURIDAD LIMPIO */}
                 <View style={styles.emptyCard}>
                   <Text style={styles.cardTitle}>Límites y Seguridad</Text>
                   <Text style={styles.detailSub}>
@@ -1207,7 +1549,6 @@ export default function App() {
               </ScrollView>
             </>
           ) : (
-            /* VISTA INTERNA: PICK UP, DETALLE DEL VUELO AEROWEB */
             <>
               <View style={styles.modalHeader}>
                 <TouchableOpacity
@@ -1227,12 +1568,11 @@ export default function App() {
                   <View style={{ padding: 10, backgroundColor: '#EFF6FF', borderRadius: 10, marginBottom: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
                     <ActivityIndicator size="small" color={COLORS.primary} />
                     <Text style={{ fontSize: 12, color: COLORS.primary, fontWeight: 'bold' }}>
-                      Actualizando datos en vivo desde Aeroweb...
+                      Conectando con Autogestión Aeroweb en vivo...
                     </Text>
                   </View>
                 )}
 
-                {/* ACORDEÓN 1: HORARIO Y BÚSQUEDA DE TRIPULACIONES */}
                 <TouchableOpacity
                   style={styles.aerowebBlueBar}
                   onPress={() => setOpenAccordion(prev => ({ ...prev, pickup: !prev.pickup }))}
@@ -1246,19 +1586,19 @@ export default function App() {
                     </View>
                     <View style={styles.aerowebPickupBox}>
                       <Text style={styles.aerowebPickupStatus}>
-                        {selectedFlight.pickupStatus || 'VIAJE VALIDADO - CONSULTANDO ESTADO DE ASIGNACIÓN'}
+                        {selectedFlight.pickupStatus || (remisLoading ? 'CONSULTANDO ESTADO EN AEROWEB...' : 'VIAJE VALIDADO - VEHÍCULO PENDIENTE DE ASIGNACIÓN')}
                       </Text>
                       <View style={{ height: 1, backgroundColor: 'rgba(255,255,255,0.25)', marginVertical: 8 }} />
                       <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
                         <Text style={styles.aerowebPickupText}>
-                          Horario de búsqueda: <Text style={{ fontWeight: 'bold' }}>{selectedFlight.pickupTime || RestarUnaHora(selectedFlight.presentacion)}</Text>
+                          Horario de búsqueda: <Text style={{ fontWeight: 'bold' }}>{selectedFlight.pickupTime || (remisLoading ? 'Leyendo Aeroweb...' : 'Ver en Mapa / Web abajo')}</Text>
                         </Text>
                         <Text style={styles.aerowebPickupText}>
                           Presentación: <Text style={{ fontWeight: 'bold' }}>{selectedFlight.presentacion}</Text>
                         </Text>
                       </View>
                       <Text style={styles.aerowebPickupText}>
-                        Domicilio: <Text style={{ fontWeight: 'bold' }}>{selectedFlight.pickupAddress || 'Sincronizando domicilio...'}</Text>
+                        Domicilio: <Text style={{ fontWeight: 'bold' }}>{selectedFlight.pickupAddress || (remisLoading ? 'Leyendo de Aeroweb...' : 'Ver en Mapa / Web abajo')}</Text>
                       </Text>
                       {selectedFlight.pickupBase && (
                         <Text style={[styles.aerowebPickupText, { marginTop: 4 }]}>
@@ -1269,7 +1609,6 @@ export default function App() {
                   </View>
                 )}
 
-                {/* ACORDEÓN 2: ESTADO DEL VUELO */}
                 <TouchableOpacity
                   style={styles.aerowebBlueBar}
                   onPress={() => setOpenAccordion(prev => ({ ...prev, flightStatus: !prev.flightStatus }))}
@@ -1304,13 +1643,14 @@ export default function App() {
                       </View>
                     ) : (
                       <Text style={{ padding: 12, fontSize: 12, color: '#64748B' }}>
-                        Cargando disponibilidad de asientos (W / Y) desde Aeroweb...
+                        {remisLoading
+                          ? 'Consultando disponibilidad de asientos (W / Y) en Aeroweb...'
+                          : 'Tocá "Ver Mapa del Auto / Web Original Aeroweb" abajo para ver el estado interactivo.'}
                       </Text>
                     )}
                   </View>
                 )}
 
-                {/* ACORDEÓN 3: TRIPULACIÓN COMPLETA */}
                 <TouchableOpacity
                   style={styles.aerowebBlueBar}
                   onPress={() => setOpenAccordion(prev => ({ ...prev, crew: !prev.crew }))}
@@ -1341,7 +1681,6 @@ export default function App() {
                   </View>
                 )}
 
-                {/* ACORDEÓN 4: VER PÁGINA / MAPA DEL REMIS EN VIVO DE AEROWEB */}
                 <TouchableOpacity
                   style={[styles.aerowebBlueBar, { backgroundColor: '#0F172A' }]}
                   onPress={() => setOpenAccordion(prev => ({ ...prev, liveWeb: !prev.liveWeb }))}
@@ -1354,10 +1693,10 @@ export default function App() {
                 <View style={openAccordion.liveWeb ? styles.liveWebContainerVisible : styles.hiddenWebView}>
                   <WebView
                     ref={remisWebViewRef}
-                    source={{ uri: getPickupTargetUrl(selectedFlight.fechaDia) }}
+                    source={{ uri: URL_AUTOGESTION_LOGIN }}
                     injectedJavaScript={pickupInjectedJS}
                     onMessage={handlePickupWebViewMessage}
-                    onLoadEnd={() => setRemisLoading(false)}
+                    onLoadEnd={() => setTimeout(() => setRemisLoading(false), 1800)}
                     sharedCookiesEnabled={true}
                     thirdPartyCookiesEnabled={true}
                     javaScriptEnabled={true}
@@ -1428,22 +1767,27 @@ const styles = StyleSheet.create({
   actividadSpecialCard: { backgroundColor: COLORS.cardBg, borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: COLORS.borderLight, borderLeftWidth: 6, shadowColor: COLORS.textDark, shadowOpacity: 0.03, shadowRadius: 4, elevation: 1 },
   actividadSpecialCardContent: { flexDirection: 'row', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 16 },
   actividadSpecialCardDate: { fontSize: 16, fontWeight: 'bold', color: COLORS.textDark, width: 85 },
-  actividadSpecialCardTitle: { fontSize: 15, color: COLORS.textMuted },
+  actividadSpecialCardTitle: { fontSize: 15, color: COLORS.textMuted, fontWeight: '600' },
   actividadSpecialCardIcon: { fontSize: 18, color: '#10B981' },
 
   emptyCard: { backgroundColor: COLORS.cardBg, borderRadius: 14, padding: 18, marginBottom: 15, borderWidth: 1, borderColor: COLORS.borderLight },
   cardTitle: { fontSize: 16, fontWeight: 'bold', color: COLORS.textDark, marginBottom: 8 },
   summaryText: { fontSize: 13, color: COLORS.textDark, marginTop: 4, textAlign: 'center' },
 
-  monthSelectorLight: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
+  monthSelectorLight: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
   monthBtnLight: { width: 36, height: 36, backgroundColor: '#f1f5f9', borderRadius: 8, justifyContent: 'center', alignItems: 'center' },
   monthBtnTextLight: { color: '#475569', fontSize: 18, fontWeight: 'bold' },
-  monthTitleLight: { fontSize: 18, fontWeight: 'bold', color: COLORS.textDark },
-  monthSubtitleLight: { fontSize: 12, color: COLORS.textMuted, marginTop: 2 },
+  monthTitleLight: { fontSize: 20, fontWeight: 'bold', color: COLORS.textDark },
+  monthSubtitleLight: { fontSize: 13, color: COLORS.textMuted, marginTop: 2 },
   sectionHeaderLight: { fontSize: 12, color: '#64748b', fontWeight: 'bold', letterSpacing: 1, marginBottom: 8, marginTop: 10, marginLeft: 10 },
   listCard: { backgroundColor: COLORS.cardBg, borderRadius: 14, paddingHorizontal: 18, marginBottom: 15, borderWidth: 1, borderColor: COLORS.borderLight },
   rowItemRight: { flexDirection: 'row', alignItems: 'center' },
-  chevron: { fontSize: 18, color: '#cbd5e1', marginLeft: 8, marginTop: -2 },
+  chevron: { fontSize: 18, color: '#64748b', marginLeft: 8 },
+  subRowViatico: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingLeft: 4, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
+  subRowDate: { fontSize: 14, color: '#64748b', width: 55, fontWeight: '500' },
+  subRowFlights: { flex: 1, fontSize: 14, color: '#475569', fontWeight: '500' },
+  subRowAmount: { fontSize: 14, color: '#475569', fontWeight: '600', marginRight: 8 },
+  subRowChevron: { fontSize: 16, color: '#94a3b8' },
   footerTextLight: { fontSize: 11, color: '#94a3b8', textAlign: 'center', marginTop: 10, paddingHorizontal: 20, lineHeight: 16 },
 
   crewRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
@@ -1465,8 +1809,8 @@ const styles = StyleSheet.create({
   toggleTextActive: { color: '#ffffff' },
 
   rowItem: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
-  itemLabel: { fontSize: 15, color: '#334155' },
-  itemVal: { fontSize: 15, fontWeight: 'bold', color: COLORS.textDark },
+  itemLabel: { fontSize: 15, color: '#334155', fontWeight: '500' },
+  itemVal: { fontSize: 16, fontWeight: 'bold', color: COLORS.textDark },
 
   modalContainer: { flex: 1, backgroundColor: COLORS.bgLight },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: COLORS.borderLight, backgroundColor: COLORS.cardBg },
@@ -1494,7 +1838,7 @@ const styles = StyleSheet.create({
   aerowebPickupText: { color: '#FFFFFF', fontSize: 12 },
   tableHeaderCell: { fontSize: 11, fontWeight: 'bold', color: '#334155' },
   tableValCell: { fontSize: 12, color: '#1E293B' },
-  liveWebContainerVisible: { height: 460, borderRadius: 10, overflow: 'hidden', borderWidth: 1, borderColor: '#CBD5E1', marginBottom: 30 },
+  liveWebContainerVisible: { height: 480, borderRadius: 10, overflow: 'hidden', borderWidth: 1, borderColor: '#CBD5E1', marginBottom: 30 },
   hiddenWebView: { width: 0, height: 0, opacity: 0, overflow: 'hidden' },
 
   tabBar: { flexDirection: 'row', position: 'absolute', bottom: 0, left: 0, right: 0, height: 65, backgroundColor: COLORS.cardBg, borderTopWidth: 1, borderTopColor: COLORS.borderLight, paddingBottom: 10 },

@@ -64,8 +64,9 @@ function parseCrewFromRawText(rawText, userProfile) {
       const nextStart = i + 1 < markers.length ? markers[i + 1].startIndex : clean.length;
       let rawName = clean.slice(current.nameStartIndex, nextStart);
 
+      // Cortar inmediatamente ante cualquier día de semana, fecha (10NOV), hora (20:15) o código de actividad (SB1)
       rawName = rawName
-        .split(/\||\[|\bAR\s*\d{3,4}|\bTripulaci|\bMensajes|\bEstado|\bCheckin|\bActividad|\bLun\b|\bMar\b|\bMi[eé]\b|\bJue\b|\bVie\b|\bS[aá]b\b|\bDom\b/i)[0]
+        .split(/\||\[|\b(?:MON|TUE|WED|THU|FRI|SAT|SUN|LUN|MAR|MIE|MIÉ|JUE|VIE|SAB|SÁB|DOM)\b|\b\d{1,2}[A-Z]{3}\b|\d{2}:\d{2}|\bSB[A-Z0-9]*\b|\bAR\s*\d{3,4}|\bTripulaci|\bMensajes|\bEstado|\bCheckin|\bActividad/i)[0]
         .trim();
 
       const member = formatCrewMember(current.rol, rawName, current.duty);
@@ -100,7 +101,8 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
   if (!fullText) return [];
   const cleanText = fullText.replace(/\s+/g, ' ');
 
-  const pattern = /(?:([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})\s+)?(AR\s*\d+[A-Z]?|RPT|D\/L|VAC|SBF|SB[A-Z]*|\*|OF|MED|LIC|S\/G|SIM)\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})\s+([A-Z]{3})\s+([A-Z]{3})\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})(?:\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2}))?(?:\s+(73[A-Z0-9]+|33[A-Z0-9]+|E190|B73[A-Z0-9]+|B38M))?/gi;
+  // Reconoce SB1, SB2, SBF, SIM, GUA, etc., y funciones al final de la fila (FO/CP) además de avión
+  const pattern = /(?:([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})\s+)?(AR\s*\d+[A-Z]?|RPT|D\/L|VAC|SB[A-Z0-9]*|\*|OF|MED|LIC|S\/G|SIM|GUA|ELD|CUR|INS)\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})\s+([A-Z]{3})\s+([A-Z]{3})\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})(?:\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2}))?(?:\s+(73[A-Z0-9]+|33[A-Z0-9]+|E190|B73[A-Z0-9]+|B38M|FO|CP))?/gi;
 
   const matches = [];
   let match;
@@ -129,9 +131,12 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
     const hacStr = m[5].trim().toUpperCase();
     const finStr = m[6].trim();
     const outStr = m[7] ? m[7].trim() : '';
-    const eqStr = m[8] ? m[8].trim() : 'B738';
+    const rawEq = m[8] ? m[8].trim().toUpperCase() : 'B738';
+    const eqStr = (rawEq === 'FO' || rawEq === 'CP') ? 'B738' : rawEq;
 
     const dateCode = extractDateCode(comStr) || extractDateCode(rawChk) || lastDateCode;
+    const endDateCode = extractDateCode(finStr) || extractDateCode(outStr) || dateCode;
+
     if (dateCode !== lastDateCode) {
       lastCheckinTime = '-';
       lastDateCode = dateCode;
@@ -141,7 +146,7 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
     const flightNumOnly = act.replace(/^AR/i, '');
 
     const chkTime = extractTimeOnly(rawChk);
-    if (chkTime !== '-' && isFlight) {
+    if (chkTime !== '-') {
       lastCheckinTime = chkTime;
     }
 
@@ -152,7 +157,8 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
     let cobTextForFlight = '';
     if (isFlight) {
       const flightRegex = new RegExp(`\\b(?:AR\\s*)?${flightNumOnly}\\b`, 'i');
-      const matchingCob = (cobList || []).find(c => c.text && flightRegex.test(c.text));
+      const matchingCobByDate = (cobList || []).find(c => c.date === dateCode && c.text && flightRegex.test(c.text));
+      const matchingCob = matchingCobByDate || (cobList || []).find(c => c.text && flightRegex.test(c.text));
 
       if (matchingCob) {
         cobTextForFlight = matchingCob.text;
@@ -168,6 +174,7 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
 
     parsed.push({
       fechaAsignada: dateCode,
+      fechaFinAsignada: endDateCode,
       checkin: chkTime !== '-' ? chkTime : lastCheckinTime,
       actividad: act,
       comienzo: comTime,
