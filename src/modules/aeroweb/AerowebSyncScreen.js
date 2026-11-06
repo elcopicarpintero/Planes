@@ -6,6 +6,7 @@ import { COLORS } from '../../theme/colors';
 import { getEncryptedData } from '../../services/storage';
 
 const DIRECT_LOGIN_URL = 'https://portalar.aerolineas.com.ar/CWP_WA/CWPLogin.aspx?ReturnUrl=/cwp_wa/CWP_RosterTW.aspx';
+const AEROWEB_MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 
 function extractTimeOnly(str) {
   if (!str) return '-';
@@ -20,13 +21,19 @@ function extractDateCode(str) {
   return `${m[1].padStart(2, '0')}${m[2].toUpperCase()}`;
 }
 
-function formatCrewMember(rolRaw, nombreRaw, dutyRaw = 'OP') {
-  let rol = (rolRaw || '').toUpperCase().trim();
-  if (rol === 'JP') rol = 'CM';
-  let nombre = (nombreRaw || '')
+export function sanitizeCrewName(raw) {
+  if (!raw) return '';
+  return raw
+    .split(/\||\[|\b(?:MON|TUE|WED|THU|FRI|SAT|SUN|LUN|MAR|MIE|MIÉ|JUE|VIE|SAB|SÁB|DOM)\b|\b\d{1,2}[A-Z]{3}\b|\d{2}:\d{2}|\bSB[A-Z0-9]*\b|\bAR\s*\d{3,4}|\bBUE\b|\bAEP\b|\bEZE\b|\bTripulaci|\bMensajes|\bEstado|\bCheckin|\bActividad/i)[0]
     .trim()
     .replace(/^[,.\s-]+|[,.\s-]+$/g, '')
     .replace(/\s+/g, ' ');
+}
+
+function formatCrewMember(rolRaw, nombreRaw, dutyRaw = 'OP') {
+  let rol = (rolRaw || '').toUpperCase().trim();
+  if (rol === 'JP') rol = 'CM';
+  const nombre = sanitizeCrewName(nombreRaw);
 
   return {
     rol,
@@ -62,12 +69,7 @@ function parseCrewFromRawText(rawText, userProfile) {
     for (let i = 0; i < markers.length; i++) {
       const current = markers[i];
       const nextStart = i + 1 < markers.length ? markers[i + 1].startIndex : clean.length;
-      let rawName = clean.slice(current.nameStartIndex, nextStart);
-
-      // Cortar inmediatamente ante cualquier día de semana, fecha (10NOV), hora (20:15) o código de actividad (SB1)
-      rawName = rawName
-        .split(/\||\[|\b(?:MON|TUE|WED|THU|FRI|SAT|SUN|LUN|MAR|MIE|MIÉ|JUE|VIE|SAB|SÁB|DOM)\b|\b\d{1,2}[A-Z]{3}\b|\d{2}:\d{2}|\bSB[A-Z0-9]*\b|\bAR\s*\d{3,4}|\bTripulaci|\bMensajes|\bEstado|\bCheckin|\bActividad/i)[0]
-        .trim();
+      const rawName = clean.slice(current.nameStartIndex, nextStart);
 
       const member = formatCrewMember(current.rol, rawName, current.duty);
       if (
@@ -97,11 +99,18 @@ function parseCrewFromRawText(rawText, userProfile) {
   return crew;
 }
 
+function extractMatricula(textSlice) {
+  if (!textSlice) return null;
+  const m = textSlice.match(/\b(LV-[A-Z]{3}|LV[A-Z]{3})\b/i);
+  if (!m) return null;
+  const raw = m[1].toUpperCase();
+  return raw.includes('-') ? raw : `LV-${raw.slice(2)}`;
+}
+
 function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
   if (!fullText) return [];
   const cleanText = fullText.replace(/\s+/g, ' ');
 
-  // Reconoce SB1, SB2, SBF, SIM, GUA, etc., y funciones al final de la fila (FO/CP) además de avión
   const pattern = /(?:([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})\s+)?(AR\s*\d+[A-Z]?|RPT|D\/L|VAC|SB[A-Z0-9]*|\*|OF|MED|LIC|S\/G|SIM|GUA|ELD|CUR|INS)\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})\s+([A-Z]{3})\s+([A-Z]{3})\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2})(?:\s+([A-Z]{3}\s*\d{2}[A-Z]{3}\s*\d{2}:\d{2}))?(?:\s+(73[A-Z0-9]+|33[A-Z0-9]+|E190|B73[A-Z0-9]+|B38M|FO|CP))?/gi;
 
   const matches = [];
@@ -134,12 +143,12 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
     const rawEq = m[8] ? m[8].trim().toUpperCase() : 'B738';
     const eqStr = (rawEq === 'FO' || rawEq === 'CP') ? 'B738' : rawEq;
 
-    const dateCode = extractDateCode(comStr) || extractDateCode(rawChk) || lastDateCode;
-    const endDateCode = extractDateCode(finStr) || extractDateCode(outStr) || dateCode;
+    const startDateCode = extractDateCode(comStr) || extractDateCode(rawChk) || lastDateCode;
+    const endDateCode = extractDateCode(finStr) || extractDateCode(outStr) || startDateCode;
 
-    if (dateCode !== lastDateCode) {
+    if (startDateCode !== lastDateCode) {
       lastCheckinTime = '-';
-      lastDateCode = dateCode;
+      lastDateCode = startDateCode;
     }
 
     const isFlight = act.startsWith('AR');
@@ -157,13 +166,13 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
     let cobTextForFlight = '';
     if (isFlight) {
       const flightRegex = new RegExp(`\\b(?:AR\\s*)?${flightNumOnly}\\b`, 'i');
-      const matchingCobByDate = (cobList || []).find(c => c.date === dateCode && c.text && flightRegex.test(c.text));
+      const matchingCobByDate = (cobList || []).find(c => c.date === startDateCode && c.text && flightRegex.test(c.text));
       const matchingCob = matchingCobByDate || (cobList || []).find(c => c.text && flightRegex.test(c.text));
 
       if (matchingCob) {
         cobTextForFlight = matchingCob.text;
-      } else if (crewMapByDate && crewMapByDate[dateCode]) {
-        cobTextForFlight = crewMapByDate[dateCode];
+      } else if (crewMapByDate && crewMapByDate[startDateCode]) {
+        cobTextForFlight = crewMapByDate[startDateCode];
       } else if (cobList && cobList[flightCounter]) {
         cobTextForFlight = cobList[flightCounter].text;
       }
@@ -171,9 +180,10 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
     }
 
     const crewSource = [cobTextForFlight, betweenText].filter(Boolean).join(' | ');
+    const matricula = extractMatricula(crewSource) || extractMatricula(cleanText.slice(Math.max(0, matches[i].index - 60), matches[i].lastIndex + 120));
 
     parsed.push({
-      fechaAsignada: dateCode,
+      fechaAsignada: startDateCode,
       fechaFinAsignada: endDateCode,
       checkin: chkTime !== '-' ? chkTime : lastCheckinTime,
       actividad: act,
@@ -183,6 +193,7 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
       fin: finTime,
       checkout: outTime,
       tipoAvion: eqStr,
+      matricula: matricula || null,
       tripulacion: isFlight ? parseCrewFromRawText(crewSource, userProfile) : []
     });
   }
@@ -190,8 +201,10 @@ function extractRosterForApp(fullText, crewMapByDate, cobList, userProfile) {
   return parsed;
 }
 
-export default function AerowebSyncScreen({ onClose, onDataParsed, silentMode = false }) {
+export default function AerowebSyncScreen({ onClose, onDataParsed, silentMode = false, fullYearSync = false }) {
   const [credentials, setCredentials] = useState(null);
+  const [needFullYear2026, setNeedFullYear2026] = useState(false);
+  const [progressLabel, setProgressLabel] = useState('Sincronizando Plan de Vuelo y Tripulaciones...');
   const webViewRef = useRef(null);
 
   useEffect(() => {
@@ -201,6 +214,10 @@ export default function AerowebSyncScreen({ onClose, onDataParsed, silentMode = 
         if (!profile) {
           const raw = await AsyncStorage.getItem('user_profile');
           if (raw) profile = JSON.parse(raw);
+        }
+        const alreadySynced2026 = await AsyncStorage.getItem('synced_full_year_2026_v1');
+        if (fullYearSync || !alreadySynced2026) {
+          setNeedFullYear2026(true);
         }
         if (profile && profile.aerowebUser) {
           setCredentials(profile);
@@ -212,7 +229,9 @@ export default function AerowebSyncScreen({ onClose, onDataParsed, silentMode = 
       }
     }
     fetchCredentials();
-  }, []);
+  }, [fullYearSync]);
+
+  const currentMonth1Based = new Date().getMonth() + 1;
 
   const injectedCode = `
     (function() {
@@ -245,16 +264,34 @@ export default function AerowebSyncScreen({ onClose, onDataParsed, silentMode = 
           }
 
           if (url.includes('roster')) {
-            var yaMostro = sessionStorage.getItem('roster_mostrado');
+            var fullYearMode = ${needFullYear2026 && !silentMode ? 'true' : 'false'};
+            var maxMonth = ${currentMonth1Based};
+            var currentStepMonth = parseInt(sessionStorage.getItem('sync_month_step') || (fullYearMode ? '1' : String(maxMonth)), 10);
+
+            var yaMostro = sessionStorage.getItem('roster_mostrado_' + currentStepMonth);
             if (!yaMostro) {
               var selects = document.querySelectorAll('select');
               for (var s = 0; s < selects.length; s++) {
                 var sel = selects[s];
                 var idName = ((sel.id || '') + (sel.name || '')).toLowerCase();
+
+                // Día desde = 1
                 if (idName.includes('day') || idName.includes('dia') || idName.includes('from')) {
                   for (var o = 0; o < sel.options.length; o++) {
                     if (sel.options[o].value === '1' || sel.options[o].value === '01') {
                       sel.selectedIndex = o;
+                      sel.dispatchEvent(new Event('change', { bubbles: true }));
+                      break;
+                    }
+                  }
+                }
+
+                // Mes = currentStepMonth (cuando descarga todo 2026 barre de Enero al mes actual)
+                if (fullYearMode && (idName.includes('month') || idName.includes('mes'))) {
+                  for (var m = 0; m < sel.options.length; m++) {
+                    var val = parseInt(sel.options[m].value, 10);
+                    if (val === currentStepMonth || sel.options[m].index + 1 === currentStepMonth) {
+                      sel.selectedIndex = m;
                       sel.dispatchEvent(new Event('change', { bubbles: true }));
                       break;
                     }
@@ -281,15 +318,21 @@ export default function AerowebSyncScreen({ onClose, onDataParsed, silentMode = 
 
               var btnMostrar = document.querySelector('input[value="Mostrar"], input[value="Ver"], input[type="submit"]');
               if (btnMostrar) {
-                sessionStorage.setItem('roster_mostrado', 'true');
+                sessionStorage.setItem('roster_mostrado_' + currentStepMonth, 'true');
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  status: 'progress',
+                  monthStep: currentStepMonth,
+                  maxMonth: maxMonth,
+                  fullYearMode: fullYearMode
+                }));
                 btnMostrar.click();
                 return;
               }
             }
 
             var bodyCheck = document.body ? document.body.innerText : '';
-            if (bodyCheck.includes('Checkin') && bodyCheck.includes('Actividad') && !window._dataSent) {
-              window._dataSent = true;
+            if (bodyCheck.includes('Checkin') && bodyCheck.includes('Actividad') && !window._dataSentForMonth) {
+              window._dataSentForMonth = true;
 
               var links = document.querySelectorAll('a[href*="openStructure"]');
               for (var i = 0; i < links.length; i++) {
@@ -334,13 +377,24 @@ export default function AerowebSyncScreen({ onClose, onDataParsed, silentMode = 
               }
 
               var fullVisibleText = document.body ? document.body.innerText : '';
+              var isLastStep = (!fullYearMode) || (currentStepMonth >= maxMonth);
 
               window.ReactNativeWebView.postMessage(JSON.stringify({ 
-                status: 'full_text', 
+                status: 'month_data', 
                 text: fullVisibleText,
                 crewMap: crewMapByDate,
-                cobList: cobList
+                cobList: cobList,
+                monthStep: currentStepMonth,
+                isLastStep: isLastStep
               }));
+
+              if (!isLastStep) {
+                var nextM = currentStepMonth + 1;
+                sessionStorage.setItem('sync_month_step', String(nextM));
+                setTimeout(function() {
+                  window._dataSentForMonth = false;
+                }, 400);
+              }
             }
           }
         } catch(e) {}
@@ -356,7 +410,14 @@ export default function AerowebSyncScreen({ onClose, onDataParsed, silentMode = 
     try {
       const data = JSON.parse(event.nativeEvent.data);
 
-      if (data.status === 'full_text') {
+      if (data.status === 'progress') {
+        if (data.fullYearMode) {
+          setProgressLabel(`Descargando historial 2026 (${AEROWEB_MONTHS[data.monthStep - 1] || data.monthStep}/${data.maxMonth})...`);
+        }
+        return;
+      }
+
+      if (data.status === 'month_data') {
         let userProfile = await getEncryptedData('user_profile');
         if (!userProfile) {
           const raw = await AsyncStorage.getItem('user_profile');
@@ -365,9 +426,19 @@ export default function AerowebSyncScreen({ onClose, onDataParsed, silentMode = 
         const rawList = extractRosterForApp(data.text, data.crewMap, data.cobList, userProfile);
 
         if (rawList.length > 0 && onDataParsed) {
-          onDataParsed({ type: 'realizada', raw: rawList });
+          await onDataParsed({
+            type: 'realizada',
+            raw: rawList,
+            isHistoricalBatch: !data.isLastStep
+          });
         }
-        if (onClose) onClose();
+
+        if (data.isLastStep) {
+          if (needFullYear2026) {
+            await AsyncStorage.setItem('synced_full_year_2026_v1', 'true');
+          }
+          if (onClose) onClose();
+        }
       }
     } catch (e) {
       if (onClose) onClose();
@@ -405,7 +476,7 @@ export default function AerowebSyncScreen({ onClose, onDataParsed, silentMode = 
           <ActivityIndicator size="large" color={COLORS.primary} />
         </View>
         <Text style={styles.syncTitle}>ACTUALIZANDO</Text>
-        <Text style={styles.syncSubTitle}>Sincronizando Plan de Vuelo y Tripulaciones...</Text>
+        <Text style={styles.syncSubTitle}>{progressLabel}</Text>
       </View>
 
       {credentials && (
