@@ -1,447 +1,343 @@
 import React, { useState, useEffect } from 'react';
 import {
-  StyleSheet,
-  Text,
-  View,
-  TextInput,
-  TouchableOpacity,
-  ScrollView,
-  Alert,
-  SafeAreaView,
-  KeyboardAvoidingView,
-  Platform
+  View, Text, TextInput, TouchableOpacity, StyleSheet,
+  SafeAreaView, ScrollView, Alert, Image
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as ImagePicker from 'expo-image-picker';
 import { COLORS } from '../../theme/colors';
 import { saveEncryptedData, getEncryptedData } from '../../services/storage';
 
 export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout }) {
-  const [mode, setMode] = useState('login'); // 'login' | 'register' | 'edit'
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-
+  const [nombre, setNombre] = useState('');
+  const [dni, setDni] = useState('');
   const [email, setEmail] = useState('');
   const [appPassword, setAppPassword] = useState('');
-
-  // Campos operativos 100% en blanco para usuarios nuevos
-  const [nombre, setNombre] = useState('');
+  const [telefono, setTelefono] = useState('');
+  const [rank, setRank] = useState(''); // Inicia en blanco sin pre-marcar nada
+  const [fleet, setFleet] = useState(''); // Inicia en blanco sin pre-marcar nada
   const [aerowebUser, setAerowebUser] = useState('');
   const [aerowebPass, setAerowebPass] = useState('');
-  const [dni, setDni] = useState('');
-  const [rank, setRank] = useState('');
+  const [avatarUri, setAvatarUri] = useState(null);
 
   useEffect(() => {
-    checkActiveSession();
+    async function loadProfile() {
+      try {
+        let saved = await getEncryptedData('user_profile');
+        if (!saved) {
+          const raw = await AsyncStorage.getItem('user_profile');
+          if (raw) saved = JSON.parse(raw);
+        }
+        if (saved && saved.aerowebUser) {
+          setNombre(saved.nombre || '');
+          setDni(saved.dni || '');
+          setEmail(saved.email || '');
+          setAppPassword(saved.appPassword || '');
+          setTelefono(saved.telefono || '');
+          setRank(saved.rank || '');
+          setFleet(saved.fleet || '');
+          setAerowebUser(saved.aerowebUser || '');
+          setAerowebPass(saved.aerowebPass || '');
+          setAvatarUri(saved.avatarUri || null);
+        }
+      } catch (e) {}
+    }
+    loadProfile();
   }, []);
 
-  const checkActiveSession = async () => {
+  const handlePickAvatar = async () => {
     try {
-      let activeProfile = await getEncryptedData('user_profile');
-      if (!activeProfile) {
-        const raw = await AsyncStorage.getItem('user_profile');
-        if (raw) activeProfile = JSON.parse(raw);
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permiso requerido', 'Habilitá el acceso a tus fotos para elegir y recortar tu imagen de perfil.');
+        return;
       }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.7,
+        base64: true
+      });
 
-      if (activeProfile && (activeProfile.aerowebUser || activeProfile.email)) {
-        setIsLoggedIn(true);
-        setMode('edit');
-        setEmail(activeProfile.email || '');
-        setAppPassword(activeProfile.appPassword || '');
-        setNombre(activeProfile.nombre || activeProfile.fullName || '');
-        setAerowebUser(activeProfile.aerowebUser || '');
-        setAerowebPass(activeProfile.aerowebPass || '');
-        setDni(activeProfile.dni || '');
-        setRank(activeProfile.rank || '');
-      } else {
-        setIsLoggedIn(false);
-        setMode('login');
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const asset = result.assets[0];
+        const finalUri = asset.base64
+          ? `data:image/jpeg;base64,${asset.base64}`
+          : asset.uri;
+        setAvatarUri(finalUri);
       }
     } catch (e) {
-      setIsLoggedIn(false);
-      setMode('login');
+      Alert.alert('Aviso', 'Verificá haber ejecutado: npx expo install expo-image-picker');
     }
   };
 
-  const getAccountsDB = async () => {
-    try {
-      const dbRaw = await getEncryptedData('accounts_db');
-      return dbRaw || {};
-    } catch (e) {
-      return {};
-    }
+  const handleRemoveAvatar = () => {
+    setAvatarUri(null);
   };
 
-  const handleLogin = async () => {
-    const cleanKey = email.trim().toLowerCase();
-    if (!cleanKey || !appPassword) {
-      Alert.alert('Datos incompletos', 'Ingresá tu correo electrónico (o legajo) y tu contraseña.');
-      return;
-    }
-
-    const db = await getAccountsDB();
-    let account = db[cleanKey];
-    if (!account) {
-      account = Object.values(db).find(
-        acc => acc.aerowebUser === cleanKey || (acc.email && acc.email.toLowerCase() === cleanKey)
-      );
-    }
-
-    if (!account || account.appPassword !== appPassword) {
+  const handleSave = async () => {
+    if (!nombre.trim() || !dni.trim() || !aerowebUser.trim() || !rank || !fleet) {
       Alert.alert(
-        'Usuario no encontrado o clave incorrecta',
-        'Si es tu primera vez con el nuevo sistema de cuentas, tocá la pestaña "Registrarse" arriba para crear tu acceso.'
+        'Datos incompletos',
+        'Por favor completá Nombre y Apellido, DNI, Función a bordo, Flota y tu Legajo de AeroWeb.'
       );
       return;
     }
-
-    await saveEncryptedData('user_profile', account);
-    await AsyncStorage.setItem('user_profile', JSON.stringify(account));
-
-    setIsLoggedIn(true);
-    setMode('edit');
-    if (onProfileUpdated) onProfileUpdated(account);
-    if (onClose) onClose();
-  };
-
-  const handleRegisterOrSave = async () => {
-    const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail) {
-      Alert.alert('Falta tu Email', 'Ingresá un correo electrónico para poder iniciar sesión fácilmente la próxima vez.');
-      return;
-    }
-    if (!appPassword) {
-      Alert.alert('Falta Contraseña', 'Definí una contraseña para ingresar a la app cuando cierres sesión.');
-      return;
-    }
-    if (!aerowebUser.trim() || !aerowebPass.trim() || !rank) {
-      Alert.alert('Faltan datos operativos', 'Completá tu Legajo, Clave de Aeroweb y seleccioná tu Función.');
-      return;
-    }
-
-    const db = await getAccountsDB();
 
     const profileData = {
-      email: cleanEmail,
+      nombre: nombre.trim().toUpperCase(),
+      dni: dni.trim(),
+      email: email.trim(),
       appPassword: appPassword,
-      nombre: nombre.trim(),
-      fullName: nombre.trim(),
+      telefono: telefono.trim(),
+      rank,
+      fleet,
       aerowebUser: aerowebUser.trim(),
-      aerowebPass: aerowebPass.trim(),
-      dni: dni.trim() || aerowebPass.trim(),
-      rank: rank,
+      aerowebPass: aerowebPass.trim() || dni.trim(),
+      avatarUri: avatarUri || null,
       updatedAt: new Date().toISOString()
     };
 
-    db[cleanEmail] = profileData;
-    await saveEncryptedData('accounts_db', db);
-    await saveEncryptedData('user_profile', profileData);
+    try {
+      await saveEncryptedData('user_profile', profileData);
+    } catch (e) {}
     await AsyncStorage.setItem('user_profile', JSON.stringify(profileData));
 
-    setIsLoggedIn(true);
-    setMode('edit');
+    try {
+      const rawAvatars = await AsyncStorage.getItem('crew_avatars_registry');
+      const registry = rawAvatars ? JSON.parse(rawAvatars) : {};
+      const cleanKey = profileData.nombre.replace(/,/g, ' ').replace(/\s+/g, ' ').trim().toUpperCase();
+      if (profileData.avatarUri) {
+        registry[cleanKey] = profileData.avatarUri;
+        registry[profileData.aerowebUser] = profileData.avatarUri;
+      } else {
+        delete registry[cleanKey];
+        delete registry[profileData.aerowebUser];
+      }
+      await AsyncStorage.setItem('crew_avatars_registry', JSON.stringify(registry));
+    } catch (e) {}
+
     if (onProfileUpdated) onProfileUpdated(profileData);
-    Alert.alert('Perfil Guardado', 'Tus credenciales quedaron asociadas a tu correo para futuros ingresos.');
     if (onClose) onClose();
   };
 
-  const handleLogoutConfirm = () => {
-    Alert.alert(
-      'Cerrar Sesión',
-      '¿Querés cerrar tu sesión? Tus credenciales quedan guardadas en tu cuenta para que vuelvas a entrar solo con tu Email y Contraseña.',
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Cerrar Sesión',
-          style: 'destructive',
-          onPress: async () => {
-            await saveEncryptedData('user_profile', null);
-            await AsyncStorage.removeItem('user_profile');
-            setIsLoggedIn(false);
-            setMode('login');
-            setAppPassword('');
-            setNombre('');
-            setAerowebUser('');
-            setAerowebPass('');
-            setDni('');
-            setRank('');
-            if (onLogout) onLogout();
-          }
-        }
-      ]
-    );
+  const handleClearSession = async () => {
+    try {
+      await saveEncryptedData('user_profile', null);
+    } catch (e) {}
+    await AsyncStorage.multiRemove([
+      'user_profile',
+      'rosterData',
+      'rosterOriginal',
+      'lastSyncTimeStr',
+      'aeroweb_annual_summary',
+      'aeroweb_vencimientos_live',
+      'synced_full_year_2026_v20'
+    ]);
+    setNombre('');
+    setDni('');
+    setEmail('');
+    setAppPassword('');
+    setTelefono('');
+    setRank('');
+    setFleet('');
+    setAerowebUser('');
+    setAerowebPass('');
+    setAvatarUri(null);
+    if (onLogout) onLogout();
   };
 
   return (
     <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>
-            {isLoggedIn ? 'Configuración de Perfil' : (mode === 'login' ? 'Iniciar Sesión' : 'Registro de Nuevo Usuario')}
-          </Text>
-          {onClose && isLoggedIn && (
-            <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
-              <Text style={styles.closeBtnText}>✕</Text>
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>Registro y Perfil de Tripulante</Text>
+        {onClose && (
+          <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
+            <Text style={styles.closeBtnText}>✕</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
+      <ScrollView contentContainerStyle={styles.scrollContent}>
+        <View style={styles.avatarSection}>
+          <View style={styles.avatarCircle}>
+            {avatarUri ? (
+              <Image source={{ uri: avatarUri }} style={styles.avatarImg} />
+            ) : (
+              <Text style={styles.avatarFallbackText}>
+                {nombre ? nombre.trim().slice(0, 2).toUpperCase() : '👤'}
+              </Text>
+            )}
+          </View>
+          <View style={styles.avatarButtonsRow}>
+            <TouchableOpacity style={styles.avatarBtnPrimary} onPress={handlePickAvatar}>
+              <Text style={styles.avatarBtnPrimaryText}>
+                {avatarUri ? 'Cambiar / Recortar Foto' : 'Subir Fotografía'}
+              </Text>
             </TouchableOpacity>
-          )}
+            {avatarUri && (
+              <TouchableOpacity style={styles.avatarBtnDanger} onPress={handleRemoveAvatar}>
+                <Text style={styles.avatarBtnDangerText}>Eliminar</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          <Text style={styles.avatarHint}>
+            Visible junto a tu nombre en la sección Tripulación de cada vuelo.
+          </Text>
         </View>
 
-        <ScrollView contentContainerStyle={styles.scroll}>
-          {!isLoggedIn && (
-            <View style={styles.switchTabContainer}>
-              <TouchableOpacity
-                style={[styles.switchTab, mode === 'login' && styles.switchTabActive]}
-                onPress={() => setMode('login')}
-              >
-                <Text style={[styles.switchTabText, mode === 'login' && styles.switchTabTextActive]}>
-                  Iniciar Sesión
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.switchTab, mode === 'register' && styles.switchTabActive]}
-                onPress={() => {
-                  setMode('register');
-                  setEmail('');
-                  setAppPassword('');
-                  setNombre('');
-                  setAerowebUser('');
-                  setAerowebPass('');
-                  setDni('');
-                  setRank('');
-                }}
-              >
-                <Text style={[styles.switchTabText, mode === 'register' && styles.switchTabTextActive]}>
-                  Registrarse (Nuevo)
-                </Text>
-              </TouchableOpacity>
-            </View>
-          )}
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>DATOS DEL TRIPULANTE</Text>
 
-          {!isLoggedIn && mode === 'login' ? (
-            <View style={styles.card}>
-              <Text style={styles.sectionTitle}>Bienvenido a PLANES</Text>
-              <Text style={styles.helperText}>
-                Ingresá tu email y contraseña. Si sos un usuario nuevo probando la beta, tocá la pestaña "Registrarse (Nuevo)" arriba.
-              </Text>
+          <Text style={styles.label}>NOMBRE Y APELLIDO</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="Apellido, Nombre"
+            placeholderTextColor="#94A3B8"
+            value={nombre}
+            onChangeText={setNombre}
+          />
 
-              <Text style={styles.label}>Correo Electrónico</Text>
+          <View style={styles.rowGap}>
+            <View style={styles.flexOne}>
+              <Text style={styles.label}>DNI (SIN PUNTOS)</Text>
               <TextInput
                 style={styles.input}
-                placeholder="tu@correo.com"
+                keyboardType="number-pad"
+                placeholder="Número de DNI"
                 placeholderTextColor="#94A3B8"
-                autoCapitalize="none"
-                keyboardType="email-address"
-                value={email}
-                onChangeText={setEmail}
+                value={dni}
+                onChangeText={setDni}
               />
-
-              <Text style={styles.label}>Contraseña</Text>
+            </View>
+            <View style={styles.flexOne}>
+              <Text style={styles.label}>WHATSAPP (GUÍA)</Text>
               <TextInput
                 style={styles.input}
-                placeholder="Contraseña de tu cuenta"
+                keyboardType="phone-pad"
+                placeholder="+54911..."
                 placeholderTextColor="#94A3B8"
-                secureTextEntry
-                value={appPassword}
-                onChangeText={setAppPassword}
+                value={telefono}
+                onChangeText={setTelefono}
               />
+            </View>
+          </View>
 
-              <TouchableOpacity style={styles.primaryBtn} onPress={handleLogin}>
-                <Text style={styles.primaryBtnText}>Ingresar</Text>
+          <Text style={styles.label}>CORREO ELECTRÓNICO</Text>
+          <TextInput
+            style={styles.input}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            placeholder="correo@aerolineas.com.ar"
+            placeholderTextColor="#94A3B8"
+            value={email}
+            onChangeText={setEmail}
+          />
+
+          <Text style={styles.label}>CONTRASEÑA DE LA APLICACIÓN</Text>
+          <TextInput
+            style={styles.input}
+            secureTextEntry={true}
+            placeholder="Contraseña para tu cuenta"
+            placeholderTextColor="#94A3B8"
+            value={appPassword}
+            onChangeText={setAppPassword}
+          />
+
+          <Text style={styles.label}>FUNCIÓN A BORDO</Text>
+          <View style={styles.pillsRow}>
+            {['Comandante', 'Primer Oficial', 'Comisario', 'Tripulante'].map(r => (
+              <TouchableOpacity
+                key={r}
+                style={[styles.pillBtn, rank === r && styles.pillBtnActive]}
+                onPress={() => setRank(r)}
+              >
+                <Text style={[styles.pillText, rank === r && styles.pillTextActive]}>{r}</Text>
               </TouchableOpacity>
-            </View>
-          ) : (
-            <View>
-              <View style={styles.card}>
-                <Text style={styles.sectionTitle}>1. Datos de Acceso a la App</Text>
-                <Text style={styles.helperText}>
-                  Con este correo y contraseña vas a volver a entrar si cerrás sesión.
-                </Text>
+            ))}
+          </View>
 
-                <Text style={styles.label}>Correo Electrónico</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="ejemplo@gmail.com"
-                  placeholderTextColor="#94A3B8"
-                  autoCapitalize="none"
-                  keyboardType="email-address"
-                  value={email}
-                  onChangeText={setEmail}
-                />
+          <Text style={styles.label}>FLOTA ASIGNADA</Text>
+          <View style={styles.pillsRow}>
+            {['B737', 'A330', 'E190'].map(f => (
+              <TouchableOpacity
+                key={f}
+                style={[styles.pillBtn, fleet === f && styles.pillBtnActive]}
+                onPress={() => setFleet(f)}
+              >
+                <Text style={[styles.pillText, fleet === f && styles.pillTextActive]}>{f}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
 
-                <Text style={styles.label}>Contraseña de Acceso a la App</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="Definí tu clave para entrar a PLANES"
-                  placeholderTextColor="#94A3B8"
-                  secureTextEntry
-                  value={appPassword}
-                  onChangeText={setAppPassword}
-                />
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>CREDENCIALES INDIVIDUALES AEROWEB (CIFRADAS)</Text>
 
-                <Text style={styles.label}>Nombre y Apellido</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="Ej: Damián Croci"
-                  placeholderTextColor="#94A3B8"
-                  value={nombre}
-                  onChangeText={setNombre}
-                />
-              </View>
+          <Text style={styles.label}>LEGAJO AEROWEB</Text>
+          <TextInput
+            style={styles.input}
+            keyboardType="number-pad"
+            placeholder="Número de legajo"
+            placeholderTextColor="#94A3B8"
+            value={aerowebUser}
+            onChangeText={setAerowebUser}
+          />
 
-              <View style={styles.card}>
-                <Text style={styles.sectionTitle}>2. Credenciales Aeroweb y Función</Text>
-                <Text style={styles.label}>Función Operativa</Text>
-                <View style={styles.rankContainer}>
-                  <TouchableOpacity
-                    style={[styles.rankBtn, rank === 'Comandante' && styles.rankBtnActive]}
-                    onPress={() => setRank('Comandante')}
-                  >
-                    <Text style={[styles.rankText, rank === 'Comandante' && styles.rankTextActive]}>
-                      👨‍✈️ Comandante
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.rankBtn, rank === 'Primer Oficial' && styles.rankBtnActive]}
-                    onPress={() => setRank('Primer Oficial')}
-                  >
-                    <Text style={[styles.rankText, rank === 'Primer Oficial' && styles.rankTextActive]}>
-                      ✈️ Primer Oficial
-                    </Text>
-                  </TouchableOpacity>
-                </View>
+          <Text style={styles.label}>CLAVE DE AEROWEB</Text>
+          <TextInput
+            style={styles.input}
+            secureTextEntry={true}
+            placeholder="Tu clave personal de AeroWeb"
+            placeholderTextColor="#94A3B8"
+            value={aerowebPass}
+            onChangeText={setAerowebPass}
+          />
+        </View>
 
-                <Text style={styles.label}>Legajo Aerolíneas</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="Ingresá tu legajo"
-                  placeholderTextColor="#94A3B8"
-                  keyboardType="numeric"
-                  value={aerowebUser}
-                  onChangeText={setAerowebUser}
-                />
+        <TouchableOpacity style={styles.saveBtn} onPress={handleSave}>
+          <Text style={styles.saveBtnText}>Guardar Perfil y Sincronizar</Text>
+        </TouchableOpacity>
 
-                <Text style={styles.label}>Contraseña Aeroweb</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="Tu clave de Aeroweb"
-                  placeholderTextColor="#94A3B8"
-                  secureTextEntry
-                  value={aerowebPass}
-                  onChangeText={setAerowebPass}
-                />
-
-                <Text style={styles.label}>DNI (Para Autogestión / Pick Up)</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="Tu DNI sin puntos"
-                  placeholderTextColor="#94A3B8"
-                  keyboardType="numeric"
-                  value={dni}
-                  onChangeText={setDni}
-                />
-
-                <TouchableOpacity style={styles.primaryBtn} onPress={handleRegisterOrSave}>
-                  <Text style={styles.primaryBtnText}>
-                    {isLoggedIn ? 'Guardar Perfil y Credenciales' : 'Crear Cuenta e Ingresar'}
-                  </Text>
-                </TouchableOpacity>
-
-                {isLoggedIn && (
-                  <TouchableOpacity style={styles.logoutBtn} onPress={handleLogoutConfirm}>
-                    <Text style={styles.logoutBtnText}>🚪 Cerrar Sesión</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-            </View>
-          )}
-        </ScrollView>
-      </KeyboardAvoidingView>
+        <TouchableOpacity style={styles.logoutBtn} onPress={handleClearSession}>
+          <Text style={styles.logoutBtnText}>Cerrar sesión y limpiar datos en este dispositivo</Text>
+        </TouchableOpacity>
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bgLight },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 20,
-    backgroundColor: COLORS.cardBg,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.borderLight
-  },
+  flexOne: { flex: 1 },
+  rowGap: { flexDirection: 'row', gap: 10 },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, backgroundColor: COLORS.cardBg, borderBottomWidth: 1, borderBottomColor: COLORS.borderLight },
   headerTitle: { fontSize: 18, fontWeight: 'bold', color: COLORS.textDark },
-  closeBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: '#F1F5F9',
-    alignItems: 'center',
-    justifyContent: 'center'
-  },
+  closeBtn: { width: 34, height: 34, borderRadius: 17, backgroundColor: '#F1F5F9', justifyContent: 'center', alignItems: 'center' },
   closeBtnText: { fontSize: 16, fontWeight: 'bold', color: '#475569' },
-  scroll: { padding: 20, paddingBottom: 60 },
-  switchTabContainer: {
-    flexDirection: 'row',
-    backgroundColor: '#E2E8F0',
-    borderRadius: 10,
-    padding: 4,
-    marginBottom: 20
-  },
-  switchTab: { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: 8 },
-  switchTabActive: { backgroundColor: COLORS.primary },
-  switchTabText: { fontSize: 13, fontWeight: 'bold', color: '#475569' },
-  switchTabTextActive: { color: '#FFFFFF' },
-  card: {
-    backgroundColor: COLORS.cardBg,
-    borderRadius: 14,
-    padding: 18,
-    marginBottom: 18,
-    borderWidth: 1,
-    borderColor: COLORS.borderLight
-  },
-  sectionTitle: { fontSize: 16, fontWeight: 'bold', color: COLORS.primary, marginBottom: 6 },
-  helperText: { fontSize: 12, color: '#64748B', marginBottom: 12 },
-  label: { fontSize: 12, fontWeight: '700', color: '#334155', marginTop: 12, marginBottom: 6 },
-  input: {
-    backgroundColor: '#F8FAFC',
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    fontSize: 15,
-    color: COLORS.textDark
-  },
-  rankContainer: { flexDirection: 'row', gap: 10, marginTop: 4, marginBottom: 6 },
-  rankBtn: {
-    flex: 1,
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-    backgroundColor: '#F8FAFC',
-    alignItems: 'center'
-  },
-  rankBtnActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
-  rankText: { fontSize: 13, fontWeight: 'bold', color: '#475569' },
-  rankTextActive: { color: '#FFFFFF' },
-  primaryBtn: {
-    backgroundColor: COLORS.primary,
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 22
-  },
-  primaryBtnText: { color: '#FFFFFF', fontSize: 15, fontWeight: 'bold' },
-  logoutBtn: {
-    backgroundColor: '#FEE2E2',
-    borderWidth: 1,
-    borderColor: '#FCA5A5',
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 14
-  },
+  scrollContent: { padding: 18, paddingBottom: 60 },
+  avatarSection: { alignItems: 'center', marginBottom: 18, backgroundColor: COLORS.cardBg, padding: 18, borderRadius: 16, borderWidth: 1, borderColor: COLORS.borderLight },
+  avatarCircle: { width: 92, height: 92, borderRadius: 46, backgroundColor: '#E0F2FE', borderWidth: 2, borderColor: COLORS.primary, justifyContent: 'center', alignItems: 'center', overflow: 'hidden', marginBottom: 12 },
+  avatarImg: { width: 92, height: 92, resizeMode: 'cover' },
+  avatarFallbackText: { fontSize: 28, fontWeight: '800', color: COLORS.primary },
+  avatarButtonsRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
+  avatarBtnPrimary: { backgroundColor: COLORS.primary, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20 },
+  avatarBtnPrimaryText: { color: '#FFFFFF', fontSize: 13, fontWeight: 'bold' },
+  avatarBtnDanger: { backgroundColor: '#FEE2E2', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20 },
+  avatarBtnDangerText: { color: '#DC2626', fontSize: 13, fontWeight: 'bold' },
+  avatarHint: { fontSize: 11.5, color: '#64748B', marginTop: 8, textAlign: 'center' },
+  card: { backgroundColor: COLORS.cardBg, borderRadius: 16, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: COLORS.borderLight },
+  sectionTitle: { fontSize: 12, fontWeight: '800', color: COLORS.primary, letterSpacing: 0.8, marginBottom: 10 },
+  label: { fontSize: 11, fontWeight: '700', color: '#64748B', marginBottom: 6, marginTop: 8 },
+  input: { backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#CBD5E1', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 11, fontSize: 15, fontWeight: '600', color: COLORS.textDark },
+  pillsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4, marginBottom: 6 },
+  pillBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#CBD5E1' },
+  pillBtnActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  pillText: { fontSize: 13, fontWeight: 'bold', color: '#475569' },
+  pillTextActive: { color: '#FFFFFF' },
+  saveBtn: { backgroundColor: COLORS.primary, paddingVertical: 15, borderRadius: 14, alignItems: 'center', marginTop: 4 },
+  saveBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: 'bold' },
+  logoutBtn: { paddingVertical: 14, alignItems: 'center', marginTop: 10 },
   logoutBtnText: { color: '#DC2626', fontSize: 14, fontWeight: 'bold' }
 });

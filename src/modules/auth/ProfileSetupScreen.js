@@ -1,56 +1,135 @@
-// src/modules/auth/ProfileSetupScreen.js
 import React, { useState, useEffect } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, SafeAreaView, Alert } from 'react-native';
+import {
+  View, Text, TextInput, TouchableOpacity, StyleSheet,
+  SafeAreaView, ScrollView, Alert, Image
+} from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as ImagePicker from 'expo-image-picker';
 import { COLORS } from '../../theme/colors';
 import { saveEncryptedData, getEncryptedData } from '../../services/storage';
 
-export default function ProfileSetupScreen({ onClose }) {
-  const [role, setRole] = useState('Copiloto');
-  const [fleet, setFleet] = useState('B737');
-  const [whatsapp, setWhatsapp] = useState('');
+export default function ProfileSetupScreen({ onClose, onProfileUpdated, onLogout }) {
+  const [nombre, setNombre] = useState('');
+  const [dni, setDni] = useState('');
+  const [email, setEmail] = useState('');
+  const [appPassword, setAppPassword] = useState('');
+  const [telefono, setTelefono] = useState('');
+  const [rank, setRank] = useState('Primer Oficial'); // 'Comandante' | 'Primer Oficial' | 'Comisario' | 'Tripulante'
+  const [fleet, setFleet] = useState('B737'); // 'B737' | 'A330' | 'E190'
   const [aerowebUser, setAerowebUser] = useState('');
   const [aerowebPass, setAerowebPass] = useState('');
-  const [dni, setDni] = useState('');
+  const [avatarUri, setAvatarUri] = useState(null);
 
   useEffect(() => {
     async function loadProfile() {
-      const savedProfile = await getEncryptedData('user_profile');
-      if (savedProfile) {
-        setRole(savedProfile.role || 'Copiloto');
-        setFleet(savedProfile.fleet || 'B737');
-        setWhatsapp(savedProfile.whatsapp || '');
-        setAerowebUser(savedProfile.aerowebUser || '');
-        setAerowebPass(savedProfile.aerowebPass || '');
-        setDni(savedProfile.dni || '');
-      }
+      try {
+        let saved = await getEncryptedData('user_profile');
+        if (!saved) {
+          const raw = await AsyncStorage.getItem('user_profile');
+          if (raw) saved = JSON.parse(raw);
+        }
+        if (saved) {
+          setNombre(saved.nombre || '');
+          setDni(saved.dni || '');
+          setEmail(saved.email || '');
+          setAppPassword(saved.appPassword || '');
+          setTelefono(saved.telefono || '');
+          setRank(saved.rank || 'Primer Oficial');
+          setFleet(saved.fleet || 'B737');
+          setAerowebUser(saved.aerowebUser || '');
+          setAerowebPass(saved.aerowebPass || '');
+          setAvatarUri(saved.avatarUri || null);
+        }
+      } catch (e) {}
     }
     loadProfile();
   }, []);
 
+  const handlePickAvatar = async () => {
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permiso requerido', 'Habilitá el acceso a tus fotos para elegir y recortar tu imagen de perfil.');
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true, // Permite recortar la fotografía en formato cuadrado 1:1
+        aspect: [1, 1],
+        quality: 0.7,
+        base64: true
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const asset = result.assets[0];
+        const finalUri = asset.base64
+          ? `data:image/jpeg;base64,${asset.base64}`
+          : asset.uri;
+        setAvatarUri(finalUri);
+      }
+    } catch (e) {
+      Alert.alert('Aviso', 'Verificá haber ejecutado: npx expo install expo-image-picker');
+    }
+  };
+
+  const handleRemoveAvatar = () => {
+    setAvatarUri(null);
+  };
+
   const handleSave = async () => {
-    if (!aerowebUser || !aerowebPass) {
-      Alert.alert('Datos Incompletos', 'Por favor ingresá tu legajo y contraseña de Aeroweb.');
+    if (!nombre.trim() || !dni.trim() || !aerowebUser.trim()) {
+      Alert.alert('Datos incompletos', 'Por favor completá Nombre y Apellido, DNI y tu Legajo de AeroWeb.');
       return;
     }
 
     const profileData = {
-      role,
+      nombre: nombre.trim().toUpperCase(),
+      dni: dni.trim(),
+      email: email.trim(),
+      appPassword: appPassword,
+      telefono: telefono.trim(),
+      rank,
       fleet,
-      whatsapp,
-      aerowebUser,
-      aerowebPass,
-      dni
+      aerowebUser: aerowebUser.trim(),
+      aerowebPass: aerowebPass.trim() || dni.trim(),
+      avatarUri: avatarUri || null,
+      updatedAt: new Date().toISOString()
     };
 
-    await saveEncryptedData('user_profile', profileData);
-    Alert.alert('Perfil Guardado', 'Tus credenciales han sido encriptadas correctamente en tu dispositivo.');
+    try {
+      await saveEncryptedData('user_profile', profileData);
+    } catch (e) {}
+    await AsyncStorage.setItem('user_profile', JSON.stringify(profileData));
+
+    // Guardar también la fotografía en el registro central de avatares de tripulación por nombre y legajo
+    try {
+      const rawAvatars = await AsyncStorage.getItem('crew_avatars_registry');
+      const registry = rawAvatars ? JSON.parse(rawAvatars) : {};
+      const cleanKey = profileData.nombre.replace(/,/g, ' ').replace(/\s+/g, ' ').trim().toUpperCase();
+      if (profileData.avatarUri) {
+        registry[cleanKey] = profileData.avatarUri;
+        registry[profileData.aerowebUser] = profileData.avatarUri;
+      } else {
+        delete registry[cleanKey];
+        delete registry[profileData.aerowebUser];
+      }
+      await AsyncStorage.setItem('crew_avatars_registry', JSON.stringify(registry));
+    } catch (e) {}
+
+    if (onProfileUpdated) onProfileUpdated(profileData);
+    if (onClose) onClose();
+  };
+
+  const handleClearSession = async () => {
+    await AsyncStorage.removeItem('user_profile');
+    if (onLogout) onLogout();
     if (onClose) onClose();
   };
 
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.title}>Configurar Perfil</Text>
+        <Text style={styles.headerTitle}>Registro y Perfil de Tripulante</Text>
         {onClose && (
           <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
             <Text style={styles.closeBtnText}>✕</Text>
@@ -59,87 +138,151 @@ export default function ProfileSetupScreen({ onClose }) {
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollContent}>
-        <Text style={styles.subtitle}>
-          Tus credenciales se guardan encriptadas en el chip de seguridad de tu dispositivo y nunca salen de él.
-        </Text>
-
-        {/* FUNCIÓN */}
-        <Text style={styles.label}>FUNCIÓN OPERATIVA</Text>
-        <View style={styles.row}>
-          {['Comandante', 'Copiloto', 'TCP'].map((item) => (
-            <TouchableOpacity 
-              key={item} 
-              style={[styles.chip, role === item && styles.chipActive]}
-              onPress={() => setRole(item)}
-            >
-              <Text style={[styles.chipText, role === item && styles.chipTextActive]}>{item}</Text>
+        {/* SECCIÓN FOTOGRAFÍA DE PERFIL */}
+        <View style={styles.avatarSection}>
+          <View style={styles.avatarCircle}>
+            {avatarUri ? (
+              <Image source={{ uri: avatarUri }} style={styles.avatarImg} />
+            ) : (
+              <Text style={styles.avatarFallbackText}>
+                {nombre ? nombre.trim().slice(0, 2).toUpperCase() : '✈️'}
+              </Text>
+            )}
+          </View>
+          <View style={styles.avatarButtonsRow}>
+            <TouchableOpacity style={styles.avatarBtnPrimary} onPress={handlePickAvatar}>
+              <Text style={styles.avatarBtnPrimaryText}>
+                {avatarUri ? 'Cambiar / Recortar Foto' : 'Subir Fotografía'}
+              </Text>
             </TouchableOpacity>
-          ))}
+            {avatarUri && (
+              <TouchableOpacity style={styles.avatarBtnDanger} onPress={handleRemoveAvatar}>
+                <Text style={styles.avatarBtnDangerText}>Eliminar</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          <Text style={styles.avatarHint}>
+            Visible junto a tu nombre en la sección Tripulación de cada vuelo.
+          </Text>
         </View>
 
-        {/* FLOTA */}
-        <Text style={styles.label}>FLOTA PRINCIPAL</Text>
-        <View style={styles.row}>
-          {['B737', 'E190', 'A330'].map((item) => (
-            <TouchableOpacity 
-              key={item} 
-              style={[styles.chip, fleet === item && styles.chipActive]}
-              onPress={() => setFleet(item)}
-            >
-              <Text style={[styles.chipText, fleet === item && styles.chipTextActive]}>{item}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
+        {/* DATOS PERSONALES Y DE CUENTA */}
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>DATOS DEL TRIPULANTE</Text>
 
-        {/* WHATSAPP */}
-        <Text style={styles.label}>WHATSAPP (Para listas de tripulación)</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="+54 9 11 1234-5678"
-          placeholderTextColor={COLORS.textMuted}
-          keyboardType="phone-pad"
-          value={whatsapp}
-          onChangeText={setWhatsapp}
-        />
-
-        {/* ACCESO AEROWEB */}
-        <View style={styles.vaultSection}>
-          <Text style={styles.vaultTitle}>🔒 Acceso Aeroweb</Text>
-
-          <Text style={styles.label}>LEGAJO</Text>
+          <Text style={styles.label}>NOMBRE Y APELLIDO (EJ: CROCI STAZIUK, DAMIAN)</Text>
           <TextInput
             style={styles.input}
+            placeholder="Apellido, Nombre"
+            placeholderTextColor="#94A3B8"
+            value={nombre}
+            onChangeText={setNombre}
+          />
+
+          <View style={styles.rowGap}>
+            <View style={styles.flexOne}>
+              <Text style={styles.label}>DNI (SIN PUNTOS)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="number-pad"
+                placeholder="Ej: 32123456"
+                placeholderTextColor="#94A3B8"
+                value={dni}
+                onChangeText={setDni}
+              />
+            </View>
+            <View style={styles.flexOne}>
+              <Text style={styles.label}>WHATSAPP (GUÍA)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="phone-pad"
+                placeholder="+54911..."
+                placeholderTextColor="#94A3B8"
+                value={telefono}
+                onChangeText={setTelefono}
+              />
+            </View>
+          </View>
+
+          <Text style={styles.label}>CORREO ELECTRÓNICO</Text>
+          <TextInput
+            style={styles.input}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            placeholder="nombre@aerolineas.com.ar"
+            placeholderTextColor="#94A3B8"
+            value={email}
+            onChangeText={setEmail}
+          />
+
+          <Text style={styles.label}>CONTRASEÑA DE LA APLICACIÓN</Text>
+          <TextInput
+            style={styles.input}
+            secureTextEntry={true}
+            placeholder="Contraseña de tu cuenta en PLANES"
+            placeholderTextColor="#94A3B8"
+            value={appPassword}
+            onChangeText={setAppPassword}
+          />
+
+          <Text style={styles.label}>FUNCIÓN A BORDO</Text>
+          <View style={styles.pillsRow}>
+            {['Comandante', 'Primer Oficial', 'Comisario', 'Tripulante'].map(r => (
+              <TouchableOpacity
+                key={r}
+                style={[styles.pillBtn, rank === r && styles.pillBtnActive]}
+                onPress={() => setRank(r)}
+              >
+                <Text style={[styles.pillText, rank === r && styles.pillTextActive]}>{r}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <Text style={styles.label}>FLOTA ASIGNADA</Text>
+          <View style={styles.pillsRow}>
+            {['B737', 'A330', 'E190'].map(f => (
+              <TouchableOpacity
+                key={f}
+                style={[styles.pillBtn, fleet === f && styles.pillBtnActive]}
+                onPress={() => setFleet(f)}
+              >
+                <Text style={[styles.pillText, fleet === f && styles.pillTextActive]}>{f}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+
+        {/* CREDENCIALES ENCRIPTADAS DE AEROWEB */}
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>CREDENCIALES INDIVIDUALES AEROWEB (CIFRADAS)</Text>
+
+          <Text style={styles.label}>LEGAJO AEROWEB (SIN AR)</Text>
+          <TextInput
+            style={styles.input}
+            keyboardType="number-pad"
             placeholder="Ej: 31451"
-            placeholderTextColor={COLORS.textMuted}
+            placeholderTextColor="#94A3B8"
             value={aerowebUser}
             onChangeText={setAerowebUser}
-            autoCapitalize="none"
-            keyboardType="number-pad"
           />
 
-          <Text style={styles.label}>CONTRASEÑA PORTAL AEROWEB</Text>
+          <Text style={styles.label}>CLAVE DE AEROWEB</Text>
           <TextInput
             style={styles.input}
-            placeholder="••••••••"
-            placeholderTextColor={COLORS.textMuted}
-            secureTextEntry
+            secureTextEntry={true}
+            placeholder="Tu clave personal de AeroWeb"
+            placeholderTextColor="#94A3B8"
             value={aerowebPass}
             onChangeText={setAerowebPass}
-          />
-
-          <Text style={styles.label}>DNI (Clave por defecto Programación/Roster)</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Ej: 32888999"
-            placeholderTextColor={COLORS.textMuted}
-            value={dni}
-            onChangeText={setDni}
-            keyboardType="number-pad"
           />
         </View>
 
         <TouchableOpacity style={styles.saveBtn} onPress={handleSave}>
-          <Text style={styles.saveBtnText}>Guardar Datos Encriptados</Text>
+          <Text style={styles.saveBtnText}>Guardar Perfil y Sincronizar</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.logoutBtn} onPress={handleClearSession}>
+          <Text style={styles.logoutBtnText}>Cerrar sesión en este dispositivo</Text>
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>
@@ -148,21 +291,34 @@ export default function ProfileSetupScreen({ onClose }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bgLight },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: COLORS.borderLight, backgroundColor: COLORS.cardBg },
-  title: { fontSize: 20, fontWeight: 'bold', color: COLORS.primary },
-  closeBtn: { backgroundColor: '#f1f5f9', width: 32, height: 32, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
-  closeBtnText: { fontSize: 16, fontWeight: 'bold', color: COLORS.textDark },
-  scrollContent: { padding: 20 },
-  subtitle: { fontSize: 13, color: COLORS.textMuted, marginBottom: 20, lineHeight: 18 },
-  label: { fontSize: 11, fontWeight: '700', color: COLORS.textMuted, marginBottom: 8, marginTop: 12 },
-  row: { flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginBottom: 8 },
-  chip: { paddingVertical: 8, paddingHorizontal: 16, borderRadius: 20, backgroundColor: COLORS.cardBg, borderWidth: 1, borderColor: COLORS.border },
-  chipActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
-  chipText: { color: COLORS.textDark, fontWeight: '600', fontSize: 13 },
-  chipTextActive: { color: '#ffffff' },
-  input: { backgroundColor: COLORS.cardBg, borderWidth: 1, borderColor: COLORS.border, borderRadius: 8, padding: 12, color: COLORS.textDark, fontSize: 15 },
-  vaultSection: { marginTop: 20, padding: 16, backgroundColor: COLORS.cardBg, borderRadius: 12, borderWidth: 1, borderColor: COLORS.borderLight },
-  vaultTitle: { fontSize: 15, fontWeight: 'bold', color: COLORS.primary, marginBottom: 10 },
-  saveBtn: { backgroundColor: COLORS.primary, borderRadius: 8, padding: 16, alignItems: 'center', marginTop: 25, marginBottom: 40 },
-  saveBtnText: { color: '#ffffff', fontSize: 16, fontWeight: 'bold' }
+  flexOne: { flex: 1 },
+  rowGap: { flexDirection: 'row', gap: 10 },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, backgroundColor: COLORS.cardBg, borderBottomWidth: 1, borderBottomColor: COLORS.borderLight },
+  headerTitle: { fontSize: 18, fontWeight: 'bold', color: COLORS.textDark },
+  closeBtn: { width: 34, height: 34, borderRadius: 17, backgroundColor: '#F1F5F9', justifyContent: 'center', alignItems: 'center' },
+  closeBtnText: { fontSize: 16, fontWeight: 'bold', color: '#475569' },
+  scrollContent: { padding: 18, paddingBottom: 60 },
+  avatarSection: { alignItems: 'center', marginBottom: 18, backgroundColor: COLORS.cardBg, padding: 18, borderRadius: 16, borderWidth: 1, borderColor: COLORS.borderLight },
+  avatarCircle: { width: 92, height: 92, borderRadius: 46, backgroundColor: '#E0F2FE', borderWidth: 2, borderColor: COLORS.primary, justifyContent: 'center', alignItems: 'center', overflow: 'hidden', marginBottom: 12 },
+  avatarImg: { width: 92, height: 92, resizeMode: 'cover' },
+  avatarFallbackText: { fontSize: 28, fontWeight: '800', color: COLORS.primary },
+  avatarButtonsRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
+  avatarBtnPrimary: { backgroundColor: COLORS.primary, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20 },
+  avatarBtnPrimaryText: { color: '#FFFFFF', fontSize: 13, fontWeight: 'bold' },
+  avatarBtnDanger: { backgroundColor: '#FEE2E2', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20 },
+  avatarBtnDangerText: { color: '#DC2626', fontSize: 13, fontWeight: 'bold' },
+  avatarHint: { fontSize: 11.5, color: '#64748B', marginTop: 8, textAlign: 'center' },
+  card: { backgroundColor: COLORS.cardBg, borderRadius: 16, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: COLORS.borderLight },
+  sectionTitle: { fontSize: 12, fontWeight: '800', color: COLORS.primary, letterSpacing: 0.8, marginBottom: 10 },
+  label: { fontSize: 11, fontWeight: '700', color: '#64748B', marginBottom: 6, marginTop: 8 },
+  input: { backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#CBD5E1', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 11, fontSize: 15, fontWeight: '600', color: COLORS.textDark },
+  pillsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4, marginBottom: 6 },
+  pillBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#CBD5E1' },
+  pillBtnActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  pillText: { fontSize: 13, fontWeight: 'bold', color: '#475569' },
+  pillTextActive: { color: '#FFFFFF' },
+  saveBtn: { backgroundColor: COLORS.primary, paddingVertical: 15, borderRadius: 14, alignItems: 'center', marginTop: 4 },
+  saveBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: 'bold' },
+  logoutBtn: { paddingVertical: 14, alignItems: 'center', marginTop: 10 },
+  logoutBtnText: { color: '#DC2626', fontSize: 14, fontWeight: 'bold' }
 });
